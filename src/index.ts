@@ -111,22 +111,36 @@ function extractPdfText(buf: Buffer): string {
 		}
 		if (text === undefined && chunk.length < 1_000_000) {
 			const raw = chunk.toString("latin1");
-			if (/\)\s*Tj|\]\s*TJ|BT[\s\S]{0,50000}ET/.test(raw)) text = raw;
+			if (raw.includes("BT") && /\)\s*Tj|\]\s*TJ/.test(raw)) text = raw;
 		}
-		if (text) {
-			const piece = decodeContentStreamText(text);
+		// Only real content streams: must contain text objects (BT..ET). This skips
+		// image/font/pixel streams, which otherwise decode to binary garbage.
+		if (text && text.includes("BT") && /\bT[jJ]\b|\)Tj|\]TJ/.test(text)) {
+			const piece = extractTextObjects(text);
 			if (piece.trim()) {
 				out.push(piece);
 				total += piece.length;
 			}
 		}
 	}
-	return out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+	const joined = out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+	return isMostlyPrintable(joined) ? joined : "";
+}
+
+/** Extract text only from within BT..ET text objects (ignores image/binary data). */
+function extractTextObjects(s: string): string {
+	let res = "";
+	const bt = /BT([\s\S]*?)ET/g;
+	let b: RegExpExecArray | null;
+	while ((b = bt.exec(s)) && res.length < MAX_TEXT_CHARS) {
+		res += decodeContentStreamText(b[1]!) + "\n";
+	}
+	return res;
 }
 
 function decodeContentStreamText(s: string): string {
 	let res = "";
-	const re = /\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>|\bT[dDj*]\b|\bTJ\b|\bTd\b/g;
+	const re = /\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>|\bT[dD*]\b/g;
 	let m: RegExpExecArray | null;
 	while ((m = re.exec(s)) && res.length < MAX_TEXT_CHARS) {
 		const tok = m[0];
@@ -135,6 +149,18 @@ function decodeContentStreamText(s: string): string {
 		else if (tok === "Td" || tok === "TD" || tok === "T*") res += "\n";
 	}
 	return res;
+}
+
+/** Guard against decoding image/binary as text: require mostly printable output. */
+function isMostlyPrintable(s: string): boolean {
+	if (!s) return false;
+	const sample = s.slice(0, 4000);
+	let printable = 0;
+	for (let i = 0; i < sample.length; i++) {
+		const c = sample.charCodeAt(i);
+		if (c === 9 || c === 10 || c === 13 || (c >= 32 && c <= 126) || c >= 160) printable++;
+	}
+	return printable / sample.length > 0.85;
 }
 
 function unescapePdfString(s: string): string {
@@ -190,7 +216,7 @@ interface Tab {
 }
 
 type Mode = "regular" | "focus" | "sideshow";
-const MODE_FRAC: Record<Mode, number> = { regular: 0.5, focus: 0.7, sideshow: 0.3 };
+const MODE_PCT: Record<Mode, `${number}%`> = { regular: "50%", focus: "70%", sideshow: "30%" };
 const MODE_LABEL: Record<Mode, string> = { regular: "Regular (50%)", focus: "Focus (70%)", sideshow: "Sideshow (30%)" };
 
 interface DrawerHooks {
@@ -202,7 +228,6 @@ interface DrawerHooks {
 	backToChat: () => void;
 	refresh: () => void;
 	isFocused: () => boolean;
-	widthFrac: () => number;
 }
 
 const BRAND = "pi-lens";
@@ -213,12 +238,9 @@ class DrawerViewer {
 
 	constructor(private theme: Theme, private h: DrawerHooks) {}
 
-	private dims() {
-		const termCols = process.stdout.columns || 100;
-		const termRows = process.stdout.rows || 40;
-		const cols = Math.max(30, Math.min(termCols - 4, Math.floor(termCols * this.h.widthFrac())));
-		const rows = Math.max(8, termRows - 4);
-		return { cols, rows };
+	/** Panel height (rows). Width is supplied by the overlay via render(width). */
+	private rowsAvail() {
+		return Math.max(8, (process.stdout.rows || 40) - 4);
 	}
 
 	private contentLines(data: Loaded, innerW: number, contentRows: number): string[] {
@@ -245,10 +267,11 @@ class DrawerViewer {
 		return lines;
 	}
 
-	render(_width: number): string[] {
+	render(width: number): string[] {
 		const t = this.theme;
 		const focused = this.h.isFocused();
-		const { cols, rows } = this.dims();
+		const cols = Math.max(20, width);
+		const rows = this.rowsAvail();
 		const innerW = Math.max(8, cols - 4);
 		const contentRows = rows - 2;
 		const border = (s: string) => t.fg(focused ? "borderAccent" : "borderMuted", s);
@@ -264,16 +287,13 @@ class DrawerViewer {
 		if (tab.scroll > maxScroll) tab.scroll = maxScroll;
 		if (tab.scroll < 0) tab.scroll = 0;
 
-		// Header: ┌─ pi-lens ┃ tab1 │ tab2 ──[ ✕ q ]┐
-		const closeStyled = t.fg("error", "✕") + t.fg("dim", " q");
-		const closeW = 3;
+		// Header: ┌─ pi-lens ┃ tab1 │ tab2 ───────────┐
 		const brandStyled = t.fg("accent", t.bold(BRAND));
-		const tabBudget = Math.max(4, cols - 3 - BRAND.length - 3 - 1 - closeW - 4);
+		const tabBudget = Math.max(4, cols - 3 - BRAND.length - 3 - 2);
 		const { text: tabbar, width: tabW } = buildTabBar(tabs, active, tabBudget, t);
 		const usedLeft = 3 + BRAND.length + 3 + tabW + 1; // "┌─ " + brand + " ┃ " + tabs + " "
-		const dashN = Math.max(0, cols - usedLeft - 1 - closeW - 3); // trailing " [..]┐"
-		const header =
-			border("┌─ ") + brandStyled + border(" ┃ ") + tabbar + border(" " + "─".repeat(dashN) + " [") + closeStyled + border("]┐");
+		const dashN = Math.max(0, cols - usedLeft - 1); // trailing "┐"
+		const header = border("┌─ ") + brandStyled + border(" ┃ ") + tabbar + border(" " + "─".repeat(dashN) + "┐");
 
 		// Body
 		const view = isImage ? all.slice(0, contentRows) : all.slice(tab.scroll, tab.scroll + contentRows);
@@ -288,7 +308,7 @@ class DrawerViewer {
 		const pct = all.length <= contentRows ? 100 : Math.round((tab.scroll / maxScroll) * 100);
 		const right = isImage ? "img" : `${pct}%`;
 		const hintsFull = focused
-			? "↑↓ scroll · ←→ tabs · w close · esc chat · q quit"
+			? "↑↓ scroll · ←→ tabs · w close tab · esc chat · q quit"
 			: "ctrl+shift+l to focus";
 		const hints = truncate(hintsFull, Math.max(0, cols - 7 - right.length - 4));
 		const fdash = Math.max(0, cols - 3 - visibleWidth(hints) - 1 - 1 - right.length - 2);
@@ -303,8 +323,7 @@ class DrawerViewer {
 	}
 
 	handleInput(data: string): void {
-		const { rows } = this.dims();
-		const page = Math.max(1, rows - 3);
+		const page = Math.max(1, this.rowsAvail() - 3);
 		const tabs = this.h.tabs();
 		const active = this.h.active();
 		const tab = tabs[active];
@@ -384,13 +403,36 @@ function clamp(line: string, cols: number): string {
 	return visibleWidth(line) <= cols ? line : truncate(line, cols);
 }
 
+const WELCOME_PATH = "\u0000pi-lens-welcome";
+const WELCOME = [
+	"# pi-lens",
+	"",
+	"You are using **pi-lens** — a TUI previewer for most file types, right inside pi.",
+	"",
+	"## Commands",
+	"- `/lens <path>` — open a file (adds a tab)",
+	"- `/lens-mode` — width: Regular · Focus · Sideshow",
+	"- `/lens-close` — close the drawer",
+	"",
+	"## Keys",
+	"- `ctrl+shift+l` — focus in / out of the drawer",
+	"- ↑ ↓ scroll · ← → tabs · `w` close tab · `q` quit",
+	"",
+	"---",
+	"",
+	"Built with ♥ by [Iamps6](https://github.com/Iamps6)",
+].join("\n");
+const welcomeTab = (): Tab => ({ path: WELCOME_PATH, data: { title: "welcome", kind: "markdown", content: WELCOME }, scroll: 0 });
+
 // ── extension ─────────────────────────────────────────────────────────────────
 export default function (pi: ExtensionAPI) {
 	const tabs: Tab[] = [];
 	let active = 0;
+	let mode: Mode = "regular";
 	let handle: OverlayHandle | null = null;
 	let tui: TUI | null = null;
 	let viewer: DrawerViewer | null = null;
+	const overlayOpts = { anchor: "right-center" as const, margin: 1, maxHeight: "100%" as const, width: MODE_PCT[mode] };
 
 	const refresh = () => { viewer?.invalidate(); tui?.requestRender(); };
 	const isFocused = () => !!handle?.isFocused();
@@ -410,42 +452,49 @@ export default function (pi: ExtensionAPI) {
 	};
 	const backToChat = () => { handle?.unfocus(); refresh(); };
 
-	let mode: Mode = "regular";
 	const hooks: DrawerHooks = {
 		tabs: () => tabs, active: () => active, setActive, closeActiveTab, closeAll, backToChat, refresh, isFocused,
-		widthFrac: () => MODE_FRAC[mode],
+	};
+
+	const ensureOpen = (ctx: ExtensionCommandContext) => {
+		if (handle) { handle.focus(); refresh(); return; }
+		overlayOpts.width = MODE_PCT[mode];
+		void ctx.ui.custom<{ closed: true }>(
+			(tuiArg, theme, _kb, _done) => {
+				tui = tuiArg;
+				viewer = new DrawerViewer(theme, hooks);
+				return viewer;
+			},
+			{ overlay: true, overlayOptions: overlayOpts, onHandle: (h) => { handle = h; h.focus(); } },
+		);
 	};
 
 	pi.registerCommand("lens", {
 		description: "Preview a file in the pi-lens side drawer (any path; ~ & relative ok)",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const raw = args.trim();
-			if (!raw) return ctx.ui.notify("Usage: /lens <path>", "warning");
 			if (ctx.mode !== "tui") return ctx.ui.notify("/lens requires the TUI", "warning");
+			const raw = args.trim();
+
+			// No path → welcome screen (or focus the drawer if already open)
+			if (!raw) {
+				if (!tabs.length) { tabs.push(welcomeTab()); active = 0; }
+				return ensureOpen(ctx);
+			}
 
 			const path = expandPath(raw, ctx.cwd);
 			let data: Loaded;
 			try { data = load(path); }
 			catch (e) { return ctx.ui.notify(`Cannot open ${path}: ${(e as Error).message}`, "error"); }
 
+			// Replace the welcome tab on first real open
+			const wi = tabs.findIndex((tb) => tb.path === WELCOME_PATH);
+			if (wi >= 0) tabs.splice(wi, 1);
+
 			const existing = tabs.findIndex((tb) => tb.path === path);
 			if (existing >= 0) { active = existing; tabs[existing]!.data = data; }
 			else { tabs.push({ path, data, scroll: 0 }); active = tabs.length - 1; }
 
-			if (handle) { handle.focus(); refresh(); return; }
-
-			void ctx.ui.custom<{ closed: true }>(
-				(tuiArg, theme, _kb, _done) => {
-					tui = tuiArg;
-					viewer = new DrawerViewer(theme, hooks);
-					return viewer;
-				},
-				{
-					overlay: true,
-					overlayOptions: { anchor: "right-center", margin: 1, maxHeight: "100%" },
-					onHandle: (h) => { handle = h; h.focus(); },
-				},
-			);
+			ensureOpen(ctx);
 		},
 	});
 
@@ -453,7 +502,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Set pi-lens drawer width (regular/focus/sideshow)",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const arg = args.trim().toLowerCase();
-			const pick = (m: Mode) => { mode = m; refresh(); ctx.ui.notify(`pi-lens width: ${MODE_LABEL[m]}`, "info"); };
+			const pick = (m: Mode) => { mode = m; overlayOpts.width = MODE_PCT[m]; refresh(); ctx.ui.notify(`pi-lens width: ${MODE_LABEL[m]}`, "info"); };
 			if (arg === "regular" || arg === "focus" || arg === "sideshow") return pick(arg);
 			if (ctx.mode !== "tui") return ctx.ui.notify("Usage: /lens-mode <regular|focus|sideshow>", "warning");
 			const order: Mode[] = ["regular", "focus", "sideshow"];
