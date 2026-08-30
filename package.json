@@ -1,7 +1,7 @@
 {
   "name": "pi-lens",
   "version": "0.1.0",
-  "description": "In-terminal file previews for pi — markdown, images, code, and dependency-free PDF text, in a scrollable overlay or a persistent side drawer.",
+  "description": "In-terminal file previews for pi — a tabbed side drawer for markdown, syntax-highlighted code, images, and dependency-free PDF text.",
   "keywords": [
     "pi",
     "pi-coding-agent",
@@ -14,7 +14,12 @@
     "tui"
   ],
   "license": "MIT",
-  "author": "Srikanth",
+  "author": "iamps6",
+  "homepage": "https://github.com/iamps6/pi-lens",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iamps6/pi-lens.git"
+  },
   "type": "module",
   "pi": {
     "extensions": [
@@ -22,8 +27,18 @@
     ]
   },
   "files": [
+    "index.ts",
     "src",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@earendil-works/pi-tui": "^0.84.2",
+    "@types/node": "^22",
+    "typescript": "^5.6.0"
+  }
 }

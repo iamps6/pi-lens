@@ -369,8 +369,8 @@ class DrawerViewer {
 
 		if (matchesKey(data, "up") || data === "k") tab.scroll -= 1;
 		else if (matchesKey(data, "down") || data === "j") tab.scroll += 1;
-		else if (data === " " || matchesKey(data, "pagedown")) tab.scroll += page;
-		else if (matchesKey(data, "pageup")) tab.scroll -= page;
+		else if (data === " " || matchesKey(data, "pageDown")) tab.scroll += page;
+		else if (matchesKey(data, "pageUp")) tab.scroll -= page;
 		else if (data === "g") tab.scroll = 0;
 		else if (data === "G") tab.scroll = Number.MAX_SAFE_INTEGER;
 		else return;
