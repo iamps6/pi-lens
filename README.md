@@ -17,7 +17,8 @@ without leaving the terminal.
 - **Markdown** — rendered with headings, tables, and syntax-highlighted code
 - **Images** — inline via your terminal's image protocol (iTerm2, Kitty, Ghostty, WezTerm, Warp)
 - **Code / text** — scrollable viewer
-- **PDF** — dependency-free text extraction (readable, searchable)
+- **Code** — syntax-highlighted with line numbers (`.ts` `.js` `.html` `.css` `.py` and many more)
+- **PDF** — dependency-free text extraction (readable, searchable; detects scanned/image PDFs)
 - **Tabbed side drawer** — open multiple files; switch between them as tabs
 - **Adjustable width** — Regular (50%) · Focus (70%) · Sideshow (30%)
 - **Stays open while you chat** — toggle focus in/out with a shortcut
@@ -26,13 +27,13 @@ without leaving the terminal.
 ## Install
 
 ```bash
-pi install git:github.com/<you>/pi-preview
+pi install git:github.com/iamps6/pi-lens
 ```
 
 Or clone for local development:
 
 ```bash
-git clone https://github.com/<you>/pi-preview
+git clone https://github.com/iamps6/pi-lens
 # then add the path to ~/.pi/settings.json under "extensions", or symlink into
 # ~/.pi/agent/extensions/
 ```
@@ -60,7 +61,7 @@ git clone https://github.com/<you>/pi-preview
 | `↑`/`↓` `j`/`k` | scroll | `←`/`→` `Tab` `[`/`]` | switch tabs |
 | `space`/`pgdn` `pgup` | page | `1`..`9` | jump to tab |
 | `g` / `G` | top / bottom | `w` | close current tab |
-| `esc` | back to chat | `q` (or ✕) | close drawer |
+| `ctrl+shift+l` | back to chat | `q` | close drawer |
 
 Try it with the bundled samples:
 

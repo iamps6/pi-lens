@@ -28,7 +28,7 @@ import type {
 	ExtensionCommandContext,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { getLanguageFromPath, getMarkdownTheme, highlightCode } from "@earendil-works/pi-coding-agent";
 import {
 	Image,
 	Key,
@@ -55,13 +55,14 @@ const IMAGE_MIME: Record<string, string> = {
 };
 const MD_EXT = new Set([".md", ".markdown", ".mdx"]);
 
-type Kind = "image" | "markdown" | "text" | "pdf";
+type Kind = "image" | "markdown" | "text" | "pdf" | "code";
 
 function classify(path: string): Kind {
 	const ext = extname(path).toLowerCase();
 	if (ext in IMAGE_MIME) return "image";
 	if (MD_EXT.has(ext)) return "markdown";
 	if (ext === ".pdf") return "pdf";
+	if (getLanguageFromPath(path)) return "code";
 	return "text";
 }
 
@@ -181,6 +182,7 @@ interface Loaded {
 	title: string;
 	kind: Kind;
 	content: string;
+	lang?: string;
 	imageBase64?: string;
 	imageMime?: string;
 }
@@ -204,6 +206,9 @@ function load(path: string): Loaded {
 			text = `(failed to extract PDF text: ${(e as Error).message})`;
 		}
 		return { title: `${title} · text`, kind: "pdf", content: capText(text || "(no extractable text — this PDF may be scanned/image-only)") };
+	}
+	if (kind === "code") {
+		return { title, kind, content: capText(readFileSync(path, "utf8")), lang: getLanguageFromPath(path) };
 	}
 	return { title, kind, content: capText(readFileSync(path, "utf8")) };
 }
@@ -252,6 +257,8 @@ class DrawerViewer {
 				lines = new Image(data.imageBase64, data.imageMime, { fallbackColor: (s: string) => this.theme.fg("dim", s) }, { maxWidthCells: innerW, maxHeightCells: contentRows }).render(innerW);
 			} else if (data.kind === "markdown") {
 				lines = new Markdown(data.content, 0, 0, getMarkdownTheme()).render(innerW);
+			} else if (data.kind === "code") {
+				lines = highlightSource(data.content, data.lang, innerW);
 			} else {
 				lines = data.content.split("\n").flatMap((l) => wrap(l, innerW));
 			}
@@ -308,7 +315,7 @@ class DrawerViewer {
 		const pct = all.length <= contentRows ? 100 : Math.round((tab.scroll / maxScroll) * 100);
 		const right = isImage ? "img" : `${pct}%`;
 		const hintsFull = focused
-			? "↑↓ scroll · ←→ tabs · w close tab · esc chat · q quit"
+			? "↑↓ scroll · ←→ tabs · w close tab · ctrl+shift+l chat · q quit"
 			: "ctrl+shift+l to focus";
 		const hints = truncate(hintsFull, Math.max(0, cols - 7 - right.length - 4));
 		const fdash = Math.max(0, cols - 3 - visibleWidth(hints) - 1 - 1 - right.length - 2);
@@ -329,7 +336,7 @@ class DrawerViewer {
 		const tab = tabs[active];
 		if (!tab) return;
 
-		if (matchesKey(data, "escape")) return this.h.backToChat();
+		if (matchesKey(data, Key.ctrlShift("l"))) return this.h.backToChat();
 		if (data === "q") return this.h.closeAll();
 		if (data === "w") return this.h.closeActiveTab();
 
@@ -379,6 +386,27 @@ function buildTabBar(tabs: Tab[], active: number, budget: number, t: Theme): { t
 	return { text, width };
 }
 
+/** Syntax-highlight source code (via pi's highlighter) and soft-wrap to width. */
+function highlightSource(content: string, lang: string | undefined, width: number): string[] {
+	let highlighted: string[];
+	try {
+		highlighted = highlightCode(content, lang);
+	} catch {
+		highlighted = content.split("\n");
+	}
+	const gutterW = String(highlighted.length).length;
+	const out: string[] = [];
+	for (let i = 0; i < highlighted.length; i++) {
+		const num = String(i + 1).padStart(gutterW, " ");
+		const gutter = `\x1b[2m${num}\x1b[22m `;
+		const body = width - gutterW - 1;
+		const parts = wrap(highlighted[i] ?? "", Math.max(4, body));
+		out.push(gutter + (parts[0] ?? ""));
+		for (let k = 1; k < parts.length; k++) out.push(" ".repeat(gutterW + 1) + parts[k]);
+	}
+	return out;
+}
+
 function wrap(line: string, width: number): string[] {
 	if (visibleWidth(line) <= width) return [line];
 	const out: string[] = [];
@@ -415,12 +443,12 @@ const WELCOME = [
 	"- `/lens-close` — close the drawer",
 	"",
 	"## Keys",
-	"- `ctrl+shift+l` — focus in / out of the drawer",
+	"- `ctrl+shift+l` — focus in / out of the drawer (scroll vs. chat)",
 	"- ↑ ↓ scroll · ← → tabs · `w` close tab · `q` quit",
 	"",
 	"---",
 	"",
-	"Built with ♥ by [Iamps6](https://github.com/Iamps6)",
+	"Built with ♥ by [iamps6](https://github.com/iamps6)",
 ].join("\n");
 const welcomeTab = (): Tab => ({ path: WELCOME_PATH, data: { title: "welcome", kind: "markdown", content: WELCOME }, scroll: 0 });
 
