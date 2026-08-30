@@ -15,7 +15,7 @@ without leaving the terminal.
 ## Features
 
 - **Markdown** — rendered with headings, tables, and syntax-highlighted code
-- **Images** — inline via your terminal's image protocol (iTerm2, Kitty, Ghostty, WezTerm, Warp)
+- **Images** — info card (type, dimensions, size). Inline rendering isn't supported inside the floating drawer, see [Limitations](#limitations)
 - **Code / text** — scrollable viewer
 - **Code** — syntax-highlighted with line numbers (`.ts` `.js` `.html` `.css` `.py` and many more)
 - **PDF** — dependency-free text extraction (readable, searchable; detects scanned/image PDFs)
@@ -89,6 +89,18 @@ Try it with the bundled samples:
 - [ ] Optional rasterized PDF pages where a rasterizer is available
 - [ ] CSV/TSV table rendering
 - [ ] File picker when no path is given
+
+## Limitations
+
+- **Inline images** can't render inside the drawer. pi's image protocol reserves
+  vertical space using cursor-movement escapes that only work in the main
+  transcript's linear flow; inside a floating overlay they corrupt the layout.
+  pi-lens therefore shows an image **info card** instead.
+- **Scanned/image-only PDFs** have no text layer, so text extraction returns
+  nothing (OCR is out of scope for a zero-dependency extension).
+- The drawer is an **overlay**, so it visually covers the right portion of the
+  transcript while open. pi has no split/reserve-column API for extensions.
+  Use `/lens-mode sideshow` to minimize coverage, or `/lens-close` when done.
 
 ## License
 

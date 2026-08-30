@@ -30,7 +30,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getLanguageFromPath, getMarkdownTheme, highlightCode } from "@earendil-works/pi-coding-agent";
 import {
-	Image,
+	getImageDimensions,
 	Key,
 	Markdown,
 	matchesKey,
@@ -183,8 +183,12 @@ interface Loaded {
 	kind: Kind;
 	content: string;
 	lang?: string;
-	imageBase64?: string;
-	imageMime?: string;
+}
+
+function fmtBytes(n: number): string {
+	if (n < 1024) return `${n} B`;
+	if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+	return `${(n / 1048576).toFixed(1)} MB`;
 }
 
 function load(path: string): Loaded {
@@ -193,7 +197,23 @@ function load(path: string): Loaded {
 	const size = statSync(path).size;
 
 	if (kind === "image") {
-		return { title, kind, content: "", imageBase64: readFileSync(path).toString("base64"), imageMime: IMAGE_MIME[extname(path).toLowerCase()] };
+		const buf = readFileSync(path);
+		const mime = IMAGE_MIME[extname(path).toLowerCase()]!;
+		const dim = getImageDimensions(buf.toString("base64"), mime);
+		const card = [
+			`# 🖼  ${title}`,
+			"",
+			`- **Type:**  ${mime}`,
+			`- **Dimensions:**  ${dim ? `${dim.widthPx} × ${dim.heightPx} px` : "unknown"}`,
+			`- **Size:**  ${fmtBytes(buf.length)}`,
+			"",
+			"---",
+			"",
+			"_Inline image rendering isn't supported inside the floating drawer_",
+			"_(pi draws images in the main transcript, not in overlays). Open the file_",
+			"_in your OS image viewer to see it._",
+		].join("\n");
+		return { title, kind: "image", content: card };
 	}
 	if (size > MAX_PARSE_BYTES) {
 		return { title: `${title} · too large`, kind: "text", content: `File is ${(size / 1048576).toFixed(1)} MB — too large to preview safely.` };
@@ -253,9 +273,7 @@ class DrawerViewer {
 		if (this.cache && this.cacheKey === key) return this.cache;
 		let lines: string[];
 		try {
-			if (data.kind === "image" && data.imageBase64 && data.imageMime) {
-				lines = new Image(data.imageBase64, data.imageMime, { fallbackColor: (s: string) => this.theme.fg("dim", s) }, { maxWidthCells: innerW, maxHeightCells: contentRows }).render(innerW);
-			} else if (data.kind === "markdown") {
+			if (data.kind === "markdown" || data.kind === "image") {
 				lines = new Markdown(data.content, 0, 0, getMarkdownTheme()).render(innerW);
 			} else if (data.kind === "code") {
 				lines = highlightSource(data.content, data.lang, innerW);
@@ -288,7 +306,6 @@ class DrawerViewer {
 		const tab = tabs[active];
 		if (!tab) return [border("┌" + "─".repeat(cols - 2) + "┐"), border("│") + " no file ".padEnd(cols - 2) + border("│"), border("└" + "─".repeat(cols - 2) + "┘")];
 
-		const isImage = tab.data.kind === "image";
 		const all = this.contentLines(tab.data, innerW, contentRows);
 		const maxScroll = Math.max(0, all.length - contentRows);
 		if (tab.scroll > maxScroll) tab.scroll = maxScroll;
@@ -303,17 +320,16 @@ class DrawerViewer {
 		const header = border("┌─ ") + brandStyled + border(" ┃ ") + tabbar + border(" " + "─".repeat(dashN) + "┐");
 
 		// Body
-		const view = isImage ? all.slice(0, contentRows) : all.slice(tab.scroll, tab.scroll + contentRows);
+		const view = all.slice(tab.scroll, tab.scroll + contentRows);
 		const body: string[] = [];
 		for (let r = 0; r < contentRows; r++) {
 			const line = view[r] ?? "";
-			if (isImage) body.push(border("│ ") + line);
-			else body.push(border("│ ") + line + " ".repeat(Math.max(0, innerW - visibleWidth(line))) + border(" │"));
+			body.push(border("│ ") + line + " ".repeat(Math.max(0, innerW - visibleWidth(line))) + border(" │"));
 		}
 
 		// Footer: └─ hints ────[ 42% ]┘
 		const pct = all.length <= contentRows ? 100 : Math.round((tab.scroll / maxScroll) * 100);
-		const right = isImage ? "img" : `${pct}%`;
+		const right = `${pct}%`;
 		const hintsFull = focused
 			? "↑↓ scroll · ←→ tabs · w close tab · ctrl+shift+l chat · q quit"
 			: "ctrl+shift+l to focus";
@@ -321,7 +337,7 @@ class DrawerViewer {
 		const fdash = Math.max(0, cols - 3 - visibleWidth(hints) - 1 - 1 - right.length - 2);
 		const footer = border("└─ ") + t.fg("dim", hints) + border(" " + "─".repeat(fdash) + " ") + t.fg("dim", right) + border(" ┘");
 
-		return [clamp(header, cols), ...body.map((l) => (isImage ? l : clamp(l, cols))), clamp(footer, cols)];
+		return [clamp(header, cols), ...body.map((l) => clamp(l, cols)), clamp(footer, cols)];
 	}
 
 	invalidate(): void {
@@ -349,7 +365,6 @@ class DrawerViewer {
 			return;
 		}
 
-		if (tab.data.kind === "image") return;
 		if (matchesKey(data, "up") || data === "k") tab.scroll -= 1;
 		else if (matchesKey(data, "down") || data === "j") tab.scroll += 1;
 		else if (data === " " || matchesKey(data, "pagedown")) tab.scroll += page;
