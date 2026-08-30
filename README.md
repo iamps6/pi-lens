@@ -18,7 +18,9 @@ without leaving the terminal.
 - **Images** — inline via your terminal's image protocol (iTerm2, Kitty, Ghostty, WezTerm, Warp)
 - **Code / text** — scrollable viewer
 - **PDF** — dependency-free text extraction (readable, searchable)
-- **Overlay or side drawer** — modal preview, or a drawer that persists while you chat
+- **Tabbed side drawer** — open multiple files; switch between them as tabs
+- **Adjustable width** — Regular (50%) · Focus (70%) · Sideshow (30%)
+- **Stays open while you chat** — toggle focus in/out with a shortcut
 - **Zero system dependencies** — pure Node/TypeScript
 
 ## Install
@@ -37,21 +39,36 @@ git clone https://github.com/<you>/pi-preview
 
 ## Usage
 
+### Commands
+
 | Command | Description |
 |---|---|
-| `/preview <path>` | Open a file in a scrollable overlay (modal) |
-| `/drawer <path>` | Open a file in a persistent right-side drawer |
-| `/drawer-close` | Close the drawer |
+| `/lens <path>` | Open a file in the drawer (opens/adds a tab). Accepts absolute, `~`, or relative paths |
+| `/lens-mode [regular\|focus\|sideshow]` | Set drawer width (interactive picker if no arg) |
+| `/lens-close` | Close the drawer |
 
-Inside the overlay: `↑/↓` scroll · `space`/`pgdn` page · `g`/`G` top/bottom · `esc`/`q` close.
+### Global shortcut
+
+| Key | Action |
+|---|---|
+| `ctrl+shift+l` | Toggle focus in/out of the drawer (scroll vs. chat) |
+
+### In-drawer keys (when focused)
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| `↑`/`↓` `j`/`k` | scroll | `←`/`→` `Tab` `[`/`]` | switch tabs |
+| `space`/`pgdn` `pgup` | page | `1`..`9` | jump to tab |
+| `g` / `G` | top / bottom | `w` | close current tab |
+| `esc` | back to chat | `q` (or ✕) | close drawer |
 
 Try it with the bundled samples:
 
 ```
-/preview samples/sample.md
-/preview samples/dot.png
-/preview samples/sample.pdf
-/drawer  samples/sample.md
+/lens samples/sample.md
+/lens samples/sample.pdf
+/lens samples/dot.png
+/lens-mode focus
 ```
 
 ## Supported formats

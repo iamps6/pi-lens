@@ -1,17 +1,26 @@
 /**
- * file-preview — in-terminal file previews for pi
+ * pi-lens — in-terminal file previews for pi
  *
  * Commands:
- *   /preview <path>        Open a file in a scrollable overlay viewer (modal)
- *   /drawer  <path>        Open a persistent right-side drawer (stays while you chat)
- *   /drawer-close          Close the drawer
+ *   /lens <path>     Open a file in the pi-lens side drawer (opens/adds a tab)
+ *   /lens-mode       Set drawer width: regular (50%) · focus (70%) · sideshow (30%)
+ *   /lens-close      Close the drawer
  *
- * Supported: .md/.markdown, images (png/jpg/gif/webp/bmp), text/code, .pdf (text extraction).
+ * Global shortcut:
+ *   ctrl+shift+l     Toggle focus in/out of the drawer (scroll vs. chat)
+ *
+ * In-drawer keys (when focused):
+ *   ↑/↓ j/k          scroll        space/pgdn · pgup   page
+ *   g / G            top / bottom  ← / → (or Tab)       switch tabs
+ *   1..9             jump to tab   w                    close current tab
+ *   esc              back to chat  q (or ✕)             close drawer
+ *
  * Zero system dependencies. PDF uses node:zlib for FlateDecode text extraction.
  */
 
-import { readFileSync } from "node:fs";
-import { basename, extname, resolve } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { inflateSync, inflateRawSync } from "node:zlib";
 
 import type {
@@ -22,11 +31,19 @@ import type {
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import {
 	Image,
+	Key,
 	Markdown,
 	matchesKey,
-	Text,
+	type OverlayHandle,
+	type TUI,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+
+// ── Safety limits (prevent freezes on large/complex files) ──────────────────
+const MAX_PARSE_BYTES = 8 * 1024 * 1024; // don't parse files larger than this
+const MAX_TEXT_CHARS = 400_000; // cap extracted/loaded text
+const MAX_LINES = 8000; // cap rendered content lines
+const MAX_INFLATE_CHARS = 2_000_000; // cap per-stream decoded size
 
 const IMAGE_MIME: Record<string, string> = {
 	".png": "image/png",
@@ -36,7 +53,6 @@ const IMAGE_MIME: Record<string, string> = {
 	".webp": "image/webp",
 	".bmp": "image/bmp",
 };
-
 const MD_EXT = new Set([".md", ".markdown", ".mdx"]);
 
 type Kind = "image" | "markdown" | "text" | "pdf";
@@ -49,189 +65,92 @@ function classify(path: string): Kind {
 	return "text";
 }
 
-/** Naive, dependency-free PDF text extraction. Good enough for readable previews. */
+/** Resolve a user path: strip quotes, ~ expansion, absolute as-is, else vs cwd. */
+function expandPath(p: string, cwd: string): string {
+	let s = p.trim().replace(/^['"]|['"]$/g, "");
+	if (s === "~") s = homedir();
+	else if (s.startsWith("~/")) s = join(homedir(), s.slice(2));
+	return isAbsolute(s) ? s : resolve(cwd, s);
+}
+
+function capText(s: string): string {
+	return s.length > MAX_TEXT_CHARS
+		? s.slice(0, MAX_TEXT_CHARS) + "\n\n… (truncated — file too large to preview fully)"
+		: s;
+}
+
+// ── Dependency-free PDF text extraction ─────────────────────────────────────
 function extractPdfText(buf: Buffer): string {
 	const out: string[] = [];
+	let total = 0;
 	let i = 0;
+	let streams = 0;
 	const needle = Buffer.from("stream");
 	const endNeedle = Buffer.from("endstream");
-	while (i < buf.length) {
+	while (i < buf.length && streams < 5000 && total < MAX_TEXT_CHARS) {
 		const s = buf.indexOf(needle, i);
 		if (s === -1) break;
 		let dataStart = s + needle.length;
-		// skip CRLF / LF after "stream"
 		if (buf[dataStart] === 0x0d) dataStart++;
 		if (buf[dataStart] === 0x0a) dataStart++;
 		const e = buf.indexOf(endNeedle, dataStart);
 		if (e === -1) break;
 		const chunk = buf.subarray(dataStart, e);
 		i = e + endNeedle.length;
+		streams++;
 
 		let text: string | undefined;
 		for (const fn of [inflateSync, inflateRawSync]) {
 			try {
-				text = fn(chunk).toString("latin1");
+				const dec = fn(chunk);
+				text = dec.subarray(0, MAX_INFLATE_CHARS).toString("latin1");
 				break;
 			} catch {
 				/* not this codec */
 			}
 		}
-		if (text === undefined) {
-			// maybe uncompressed content stream
+		if (text === undefined && chunk.length < 1_000_000) {
 			const raw = chunk.toString("latin1");
-			if (/\)\s*Tj|\]\s*TJ|BT[\s\S]*ET/.test(raw)) text = raw;
+			if (/\)\s*Tj|\]\s*TJ|BT[\s\S]{0,50000}ET/.test(raw)) text = raw;
 		}
 		if (text) {
 			const piece = decodeContentStreamText(text);
-			if (piece.trim()) out.push(piece);
+			if (piece.trim()) {
+				out.push(piece);
+				total += piece.length;
+			}
 		}
 	}
 	return out.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-/** Pull text out of PDF content-stream operators (Tj, TJ, and Td/TD/T* line breaks). */
 function decodeContentStreamText(s: string): string {
 	let res = "";
 	const re = /\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]+>|\bT[dDj*]\b|\bTJ\b|\bTd\b/g;
 	let m: RegExpExecArray | null;
-	while ((m = re.exec(s))) {
+	while ((m = re.exec(s)) && res.length < MAX_TEXT_CHARS) {
 		const tok = m[0];
-		if (tok.startsWith("(")) {
-			res += unescapePdfString(tok.slice(1, -1));
-		} else if (tok.startsWith("<")) {
-			res += hexToStr(tok.slice(1, -1));
-		} else if (tok === "Td" || tok === "TD" || tok === "T*") {
-			res += "\n";
-		}
+		if (tok.startsWith("(")) res += unescapePdfString(tok.slice(1, -1));
+		else if (tok.startsWith("<")) res += hexToStr(tok.slice(1, -1));
+		else if (tok === "Td" || tok === "TD" || tok === "T*") res += "\n";
 	}
 	return res;
 }
 
 function unescapePdfString(s: string): string {
 	return s
-		.replace(/\\n/g, "\n")
-		.replace(/\\r/g, "\r")
-		.replace(/\\t/g, "\t")
-		.replace(/\\\(/g, "(")
-		.replace(/\\\)/g, ")")
-		.replace(/\\\\/g, "\\")
+		.replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "\t")
+		.replace(/\\\(/g, "(").replace(/\\\)/g, ")").replace(/\\\\/g, "\\")
 		.replace(/\\([0-7]{1,3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
 }
-
 function hexToStr(h: string): string {
 	const clean = h.replace(/\s+/g, "");
 	let out = "";
-	for (let i = 0; i + 1 < clean.length; i += 2) {
-		out += String.fromCharCode(parseInt(clean.slice(i, i + 2), 16));
-	}
+	for (let i = 0; i + 1 < clean.length; i += 2) out += String.fromCharCode(parseInt(clean.slice(i, i + 2), 16));
 	return out;
 }
 
-interface ViewerResult {
-	closed: true;
-}
-
-/** A scrollable viewer component for text/markdown/pdf, or a fit-to-screen image. */
-class Viewer {
-	focused = true;
-	private scroll = 0;
-	private lineCache: string[] | null = null;
-	private cacheWidth = -1;
-
-	constructor(
-		private theme: Theme,
-		private title: string,
-		private kind: Kind,
-		private content: string, // text/markdown/pdf source
-		private imageBase64: string | undefined,
-		private imageMime: string | undefined,
-		private done: (r: ViewerResult) => void,
-		private heightFrac = 0.8,
-	) {}
-
-	private viewportRows(): number {
-		const rows = process.stdout.rows || 40;
-		return Math.max(5, Math.floor(rows * this.heightFrac) - 4); // title+footer+borders
-	}
-
-	private buildLines(width: number): string[] {
-		if (this.lineCache && this.cacheWidth === width) return this.lineCache;
-		const inner = Math.max(10, width);
-		let lines: string[];
-		if (this.kind === "image" && this.imageBase64 && this.imageMime) {
-			const img = new Image(
-				this.imageBase64,
-				this.imageMime,
-				{ fallbackColor: (s: string) => this.theme.fg("dim", s) },
-				{ maxWidthCells: inner, maxHeightCells: this.viewportRows() },
-			);
-			lines = img.render(inner);
-		} else if (this.kind === "markdown") {
-			lines = new Markdown(this.content, 0, 0, getMarkdownTheme()).render(inner);
-		} else {
-			// text / pdf → render as fenced-ish plain text via Markdown code styling is risky;
-			// just show raw lines with dim gutter.
-			lines = this.content
-				.split("\n")
-				.flatMap((l) => wrap(l, inner));
-		}
-		this.lineCache = lines;
-		this.cacheWidth = width;
-		return lines;
-	}
-
-	render(width: number): string[] {
-		const t = this.theme;
-		const all = this.buildLines(width);
-		const vh = this.viewportRows();
-		const maxScroll = Math.max(0, all.length - vh);
-		if (this.scroll > maxScroll) this.scroll = maxScroll;
-
-		const header = t.fg("accent", t.bold(`  ${this.title}`));
-		const isImage = this.kind === "image";
-		const body = isImage ? all : all.slice(this.scroll, this.scroll + vh);
-
-		const pct = all.length <= vh ? 100 : Math.round((this.scroll / maxScroll) * 100);
-		const hint = isImage
-			? "esc/q close"
-			: `↑/↓ scroll · space/pgdn page · g/G top/bottom · esc/q close   [${pct}%]`;
-		const footer = t.fg("dim", `  ${hint}`);
-
-		return [header, t.fg("borderMuted", "  " + "─".repeat(Math.max(0, width - 4))), ...body, footer];
-	}
-
-	invalidate(): void {
-		this.lineCache = null;
-		this.cacheWidth = -1;
-	}
-
-	handleInput(data: string): void {
-		const vh = this.viewportRows();
-		if (matchesKey(data, "escape") || data === "q") return this.done({ closed: true });
-		if (this.kind === "image") return;
-		if (matchesKey(data, "up") || data === "k") this.scroll = Math.max(0, this.scroll - 1);
-		else if (matchesKey(data, "down") || data === "j") this.scroll += 1;
-		else if (data === " " || matchesKey(data, "pagedown")) this.scroll += vh - 1;
-		else if (matchesKey(data, "pageup")) this.scroll = Math.max(0, this.scroll - (vh - 1));
-		else if (data === "g") this.scroll = 0;
-		else if (data === "G") this.scroll = Number.MAX_SAFE_INTEGER; // clamped in render
-	}
-}
-
-function wrap(line: string, width: number): string[] {
-	if (visibleWidth(line) <= width) return [line || ""];
-	const out: string[] = [];
-	let cur = "";
-	for (const ch of line) {
-		if (visibleWidth(cur + ch) > width) {
-			out.push(cur);
-			cur = ch;
-		} else cur += ch;
-	}
-	if (cur) out.push(cur);
-	return out;
-}
-
+// ── Loading ─────────────────────────────────────────────────────────────────
 interface Loaded {
 	title: string;
 	kind: Kind;
@@ -241,98 +160,324 @@ interface Loaded {
 }
 
 function load(path: string): Loaded {
-	const abs = resolve(path);
-	const title = basename(abs);
-	const kind = classify(abs);
+	const title = basename(path);
+	const kind = classify(path);
+	const size = statSync(path).size;
+
 	if (kind === "image") {
-		const base64 = readFileSync(abs).toString("base64");
-		return { title, kind, content: "", imageBase64: base64, imageMime: IMAGE_MIME[extname(abs).toLowerCase()] };
+		return { title, kind, content: "", imageBase64: readFileSync(path).toString("base64"), imageMime: IMAGE_MIME[extname(path).toLowerCase()] };
+	}
+	if (size > MAX_PARSE_BYTES) {
+		return { title: `${title} · too large`, kind: "text", content: `File is ${(size / 1048576).toFixed(1)} MB — too large to preview safely.` };
 	}
 	if (kind === "pdf") {
-		const text = extractPdfText(readFileSync(abs));
-		return {
-			title: `${title}  (extracted text)`,
-			kind: "pdf",
-			content: text || "(no extractable text — this PDF may be scanned/image-only)",
-		};
+		let text = "";
+		try {
+			text = extractPdfText(readFileSync(path));
+		} catch (e) {
+			text = `(failed to extract PDF text: ${(e as Error).message})`;
+		}
+		return { title: `${title} · text`, kind: "pdf", content: capText(text || "(no extractable text — this PDF may be scanned/image-only)") };
 	}
-	return { title, kind, content: readFileSync(abs, "utf8") };
+	return { title, kind, content: capText(readFileSync(path, "utf8")) };
 }
 
-export default function (pi: ExtensionAPI) {
-	pi.registerCommand("preview", {
-		description: "Preview a file in a scrollable terminal overlay",
-		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const path = args.trim();
-			if (!path) return ctx.ui.notify("Usage: /preview <path>", "warning");
-			if (ctx.mode !== "tui") return ctx.ui.notify("Preview requires the TUI", "warning");
+// ── Drawer state ─────────────────────────────────────────────────────────────
+interface Tab {
+	path: string;
+	data: Loaded;
+	scroll: number;
+}
 
-			let data: Loaded;
-			try {
-				data = load(path);
-			} catch (e) {
-				return ctx.ui.notify(`Cannot read ${path}: ${(e as Error).message}`, "error");
-			}
+type Mode = "regular" | "focus" | "sideshow";
+const MODE_FRAC: Record<Mode, number> = { regular: 0.5, focus: 0.7, sideshow: 0.3 };
+const MODE_LABEL: Record<Mode, string> = { regular: "Regular (50%)", focus: "Focus (70%)", sideshow: "Sideshow (30%)" };
 
-			await ctx.ui.custom<ViewerResult>(
-				(_tui, theme, _kb, done) =>
-					new Viewer(theme, data.title, data.kind, data.content, data.imageBase64, data.imageMime, done),
-				{
-					overlay: true,
-					overlayOptions: { width: "80%", maxHeight: "85%", anchor: "center" },
-				},
-			);
-		},
-	});
+interface DrawerHooks {
+	tabs: () => Tab[];
+	active: () => number;
+	setActive: (i: number) => void;
+	closeActiveTab: () => void;
+	closeAll: () => void;
+	backToChat: () => void;
+	refresh: () => void;
+	isFocused: () => boolean;
+	widthFrac: () => number;
+}
 
-	// Persistent right-side drawer that stays visible while you keep chatting.
-	let drawerClose: (() => void) | null = null;
-	pi.registerCommand("drawer", {
-		description: "Open a file in a persistent right-side drawer",
-		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const path = args.trim();
-			if (!path) return ctx.ui.notify("Usage: /drawer <path>", "warning");
-			if (ctx.mode !== "tui") return ctx.ui.notify("Drawer requires the TUI", "warning");
+const BRAND = "pi-lens";
 
-			let data: Loaded;
-			try {
-				data = load(path);
-			} catch (e) {
-				return ctx.ui.notify(`Cannot read ${path}: ${(e as Error).message}`, "error");
-			}
+class DrawerViewer {
+	private cache: string[] | null = null;
+	private cacheKey = "";
 
-			drawerClose?.();
+	constructor(private theme: Theme, private h: DrawerHooks) {}
 
-			// Do NOT await — keep the overlay open and hand input back to the editor.
-			void ctx.ui.custom<ViewerResult>(
-				(_tui, theme, _kb, done) =>
-					new Viewer(theme, data.title, data.kind, data.content, data.imageBase64, data.imageMime, done, 0.95),
-				{
-					overlay: true,
-					overlayOptions: { anchor: "right-center", width: "42%", maxHeight: "95%", margin: 1 },
-					onHandle: (handle) => {
-						// stay visible but release input so the user keeps typing to pi
-						handle.unfocus();
-						drawerClose = () => {
-							handle.hide();
-							drawerClose = null;
-						};
-					},
-				},
-			);
-			ctx.ui.notify("Drawer open (keep chatting) · /drawer-close to dismiss", "info");
-		},
-	});
+	private dims() {
+		const termCols = process.stdout.columns || 100;
+		const termRows = process.stdout.rows || 40;
+		const cols = Math.max(30, Math.min(termCols - 4, Math.floor(termCols * this.h.widthFrac())));
+		const rows = Math.max(8, termRows - 4);
+		return { cols, rows };
+	}
 
-	pi.registerCommand("drawer-close", {
-		description: "Close the file preview drawer",
-		handler: async (_args: string, ctx: ExtensionCommandContext) => {
-			if (drawerClose) {
-				drawerClose();
-				ctx.ui.notify("Drawer closed", "info");
+	private contentLines(data: Loaded, innerW: number, contentRows: number): string[] {
+		const key = `${data.title}|${data.kind}|${innerW}x${contentRows}`;
+		if (this.cache && this.cacheKey === key) return this.cache;
+		let lines: string[];
+		try {
+			if (data.kind === "image" && data.imageBase64 && data.imageMime) {
+				lines = new Image(data.imageBase64, data.imageMime, { fallbackColor: (s: string) => this.theme.fg("dim", s) }, { maxWidthCells: innerW, maxHeightCells: contentRows }).render(innerW);
+			} else if (data.kind === "markdown") {
+				lines = new Markdown(data.content, 0, 0, getMarkdownTheme()).render(innerW);
 			} else {
-				ctx.ui.notify("No drawer open", "info");
+				lines = data.content.split("\n").flatMap((l) => wrap(l, innerW));
 			}
+		} catch (e) {
+			lines = [this.theme.fg("error", `render error: ${(e as Error).message}`)];
+		}
+		if (lines.length > MAX_LINES) {
+			lines = lines.slice(0, MAX_LINES);
+			lines.push(this.theme.fg("dim", "… (truncated)"));
+		}
+		this.cache = lines;
+		this.cacheKey = key;
+		return lines;
+	}
+
+	render(_width: number): string[] {
+		const t = this.theme;
+		const focused = this.h.isFocused();
+		const { cols, rows } = this.dims();
+		const innerW = Math.max(8, cols - 4);
+		const contentRows = rows - 2;
+		const border = (s: string) => t.fg(focused ? "borderAccent" : "borderMuted", s);
+
+		const tabs = this.h.tabs();
+		const active = this.h.active();
+		const tab = tabs[active];
+		if (!tab) return [border("┌" + "─".repeat(cols - 2) + "┐"), border("│") + " no file ".padEnd(cols - 2) + border("│"), border("└" + "─".repeat(cols - 2) + "┘")];
+
+		const isImage = tab.data.kind === "image";
+		const all = this.contentLines(tab.data, innerW, contentRows);
+		const maxScroll = Math.max(0, all.length - contentRows);
+		if (tab.scroll > maxScroll) tab.scroll = maxScroll;
+		if (tab.scroll < 0) tab.scroll = 0;
+
+		// Header: ┌─ pi-lens ┃ tab1 │ tab2 ──[ ✕ q ]┐
+		const closeStyled = t.fg("error", "✕") + t.fg("dim", " q");
+		const closeW = 3;
+		const brandStyled = t.fg("accent", t.bold(BRAND));
+		const tabBudget = Math.max(4, cols - 3 - BRAND.length - 3 - 1 - closeW - 4);
+		const { text: tabbar, width: tabW } = buildTabBar(tabs, active, tabBudget, t);
+		const usedLeft = 3 + BRAND.length + 3 + tabW + 1; // "┌─ " + brand + " ┃ " + tabs + " "
+		const dashN = Math.max(0, cols - usedLeft - 1 - closeW - 3); // trailing " [..]┐"
+		const header =
+			border("┌─ ") + brandStyled + border(" ┃ ") + tabbar + border(" " + "─".repeat(dashN) + " [") + closeStyled + border("]┐");
+
+		// Body
+		const view = isImage ? all.slice(0, contentRows) : all.slice(tab.scroll, tab.scroll + contentRows);
+		const body: string[] = [];
+		for (let r = 0; r < contentRows; r++) {
+			const line = view[r] ?? "";
+			if (isImage) body.push(border("│ ") + line);
+			else body.push(border("│ ") + line + " ".repeat(Math.max(0, innerW - visibleWidth(line))) + border(" │"));
+		}
+
+		// Footer: └─ hints ────[ 42% ]┘
+		const pct = all.length <= contentRows ? 100 : Math.round((tab.scroll / maxScroll) * 100);
+		const right = isImage ? "img" : `${pct}%`;
+		const hintsFull = focused
+			? "↑↓ scroll · ←→ tabs · w close · esc chat · q quit"
+			: "ctrl+shift+l to focus";
+		const hints = truncate(hintsFull, Math.max(0, cols - 7 - right.length - 4));
+		const fdash = Math.max(0, cols - 3 - visibleWidth(hints) - 1 - 1 - right.length - 2);
+		const footer = border("└─ ") + t.fg("dim", hints) + border(" " + "─".repeat(fdash) + " ") + t.fg("dim", right) + border(" ┘");
+
+		return [clamp(header, cols), ...body.map((l) => (isImage ? l : clamp(l, cols))), clamp(footer, cols)];
+	}
+
+	invalidate(): void {
+		this.cache = null;
+		this.cacheKey = "";
+	}
+
+	handleInput(data: string): void {
+		const { rows } = this.dims();
+		const page = Math.max(1, rows - 3);
+		const tabs = this.h.tabs();
+		const active = this.h.active();
+		const tab = tabs[active];
+		if (!tab) return;
+
+		if (matchesKey(data, "escape")) return this.h.backToChat();
+		if (data === "q") return this.h.closeAll();
+		if (data === "w") return this.h.closeActiveTab();
+
+		// tab switching
+		if (matchesKey(data, "right") || matchesKey(data, "tab") || data === "]") return this.h.setActive((active + 1) % tabs.length);
+		if (matchesKey(data, "left") || matchesKey(data, "shift+tab") || data === "[") return this.h.setActive((active - 1 + tabs.length) % tabs.length);
+		if (/^[1-9]$/.test(data)) {
+			const idx = parseInt(data, 10) - 1;
+			if (idx < tabs.length) this.h.setActive(idx);
+			return;
+		}
+
+		if (tab.data.kind === "image") return;
+		if (matchesKey(data, "up") || data === "k") tab.scroll -= 1;
+		else if (matchesKey(data, "down") || data === "j") tab.scroll += 1;
+		else if (data === " " || matchesKey(data, "pagedown")) tab.scroll += page;
+		else if (matchesKey(data, "pageup")) tab.scroll -= page;
+		else if (data === "g") tab.scroll = 0;
+		else if (data === "G") tab.scroll = Number.MAX_SAFE_INTEGER;
+		else return;
+		this.invalidate();
+	}
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+function buildTabBar(tabs: Tab[], active: number, budget: number, t: Theme): { text: string; width: number } {
+	const labels = tabs.map((tab, i) => truncate(`${i + 1}·${tab.data.title}`, 22));
+	const w = labels.map((l) => visibleWidth(l));
+	const sep = 3; // " │ "
+	// choose a window [lo,hi] containing active that fits budget
+	let lo = active, hi = active, used = w[active] ?? 0;
+	for (;;) {
+		let ext = false;
+		if (hi + 1 < labels.length && used + sep + w[hi + 1] <= budget) { hi++; used += sep + w[hi]; ext = true; }
+		if (lo - 1 >= 0 && used + sep + w[lo - 1] <= budget) { lo--; used += sep + w[lo]; ext = true; }
+		if (!ext) break;
+	}
+	const parts: string[] = [];
+	for (let i = lo; i <= hi; i++) {
+		const styled = i === active ? t.fg("accent", t.bold(labels[i]!)) : t.fg("muted", labels[i]!);
+		parts.push(styled);
+	}
+	let text = parts.join(t.fg("dim", " │ "));
+	let width = used;
+	if (lo > 0) { text = t.fg("dim", "‹ ") + text; width += 2; }
+	if (hi < labels.length - 1) { text = text + t.fg("dim", " ›"); width += 2; }
+	return { text, width };
+}
+
+function wrap(line: string, width: number): string[] {
+	if (visibleWidth(line) <= width) return [line];
+	const out: string[] = [];
+	let cur = "";
+	for (const ch of line) {
+		if (visibleWidth(cur + ch) > width) { out.push(cur); cur = ch; } else cur += ch;
+	}
+	out.push(cur);
+	return out;
+}
+
+function truncate(s: string, max: number): string {
+	if (max <= 0) return "";
+	if (visibleWidth(s) <= max) return s;
+	let out = "";
+	for (const ch of s) { if (visibleWidth(out + ch) > max - 1) break; out += ch; }
+	return out + "…";
+}
+
+/** Guard against wrapping: never let a framed line exceed the panel width. */
+function clamp(line: string, cols: number): string {
+	return visibleWidth(line) <= cols ? line : truncate(line, cols);
+}
+
+// ── extension ─────────────────────────────────────────────────────────────────
+export default function (pi: ExtensionAPI) {
+	const tabs: Tab[] = [];
+	let active = 0;
+	let handle: OverlayHandle | null = null;
+	let tui: TUI | null = null;
+	let viewer: DrawerViewer | null = null;
+
+	const refresh = () => { viewer?.invalidate(); tui?.requestRender(); };
+	const isFocused = () => !!handle?.isFocused();
+
+	const closeAll = () => {
+		handle?.hide();
+		handle = null; tui = null; viewer = null;
+		tabs.length = 0; active = 0;
+	};
+	const setActive = (i: number) => { active = i; refresh(); };
+	const closeActiveTab = () => {
+		if (!tabs.length) return;
+		tabs.splice(active, 1);
+		if (!tabs.length) return closeAll();
+		if (active >= tabs.length) active = tabs.length - 1;
+		refresh();
+	};
+	const backToChat = () => { handle?.unfocus(); refresh(); };
+
+	let mode: Mode = "regular";
+	const hooks: DrawerHooks = {
+		tabs: () => tabs, active: () => active, setActive, closeActiveTab, closeAll, backToChat, refresh, isFocused,
+		widthFrac: () => MODE_FRAC[mode],
+	};
+
+	pi.registerCommand("lens", {
+		description: "Preview a file in the pi-lens side drawer (any path; ~ & relative ok)",
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			const raw = args.trim();
+			if (!raw) return ctx.ui.notify("Usage: /lens <path>", "warning");
+			if (ctx.mode !== "tui") return ctx.ui.notify("/lens requires the TUI", "warning");
+
+			const path = expandPath(raw, ctx.cwd);
+			let data: Loaded;
+			try { data = load(path); }
+			catch (e) { return ctx.ui.notify(`Cannot open ${path}: ${(e as Error).message}`, "error"); }
+
+			const existing = tabs.findIndex((tb) => tb.path === path);
+			if (existing >= 0) { active = existing; tabs[existing]!.data = data; }
+			else { tabs.push({ path, data, scroll: 0 }); active = tabs.length - 1; }
+
+			if (handle) { handle.focus(); refresh(); return; }
+
+			void ctx.ui.custom<{ closed: true }>(
+				(tuiArg, theme, _kb, _done) => {
+					tui = tuiArg;
+					viewer = new DrawerViewer(theme, hooks);
+					return viewer;
+				},
+				{
+					overlay: true,
+					overlayOptions: { anchor: "right-center", margin: 1, maxHeight: "100%" },
+					onHandle: (h) => { handle = h; h.focus(); },
+				},
+			);
+		},
+	});
+
+	pi.registerCommand("lens-mode", {
+		description: "Set pi-lens drawer width (regular/focus/sideshow)",
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			const arg = args.trim().toLowerCase();
+			const pick = (m: Mode) => { mode = m; refresh(); ctx.ui.notify(`pi-lens width: ${MODE_LABEL[m]}`, "info"); };
+			if (arg === "regular" || arg === "focus" || arg === "sideshow") return pick(arg);
+			if (ctx.mode !== "tui") return ctx.ui.notify("Usage: /lens-mode <regular|focus|sideshow>", "warning");
+			const order: Mode[] = ["regular", "focus", "sideshow"];
+			const choice = await ctx.ui.select("pi-lens drawer width", order.map((m) => MODE_LABEL[m]));
+			if (!choice) return;
+			pick(order[order.findIndex((m) => MODE_LABEL[m] === choice)] ?? "regular");
+		},
+	});
+
+	pi.registerCommand("lens-close", {
+		description: "Close the pi-lens drawer",
+		handler: async (_args: string, ctx: ExtensionCommandContext) => {
+			if (tabs.length || handle) { closeAll(); ctx.ui.notify("pi-lens closed", "info"); }
+			else ctx.ui.notify("No lens open", "info");
+		},
+	});
+
+	pi.registerShortcut(Key.ctrlShift("l"), {
+		description: "pi-lens: toggle focus in/out of the drawer",
+		handler: async (ctx) => {
+			if (!handle) return ctx.ui.notify("No lens open — use /lens <path>", "info");
+			if (handle.isFocused()) handle.unfocus();
+			else handle.focus();
+			refresh();
 		},
 	});
 }
