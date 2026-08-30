@@ -31,6 +31,7 @@ import type {
 import { getLanguageFromPath, getMarkdownTheme, highlightCode } from "@earendil-works/pi-coding-agent";
 import {
 	getImageDimensions,
+	Image,
 	Key,
 	Markdown,
 	matchesKey,
@@ -183,6 +184,8 @@ interface Loaded {
 	kind: Kind;
 	content: string;
 	lang?: string;
+	imageBase64?: string;
+	imageMime?: string;
 }
 
 function fmtBytes(n: number): string {
@@ -209,11 +212,10 @@ function load(path: string): Loaded {
 			"",
 			"---",
 			"",
-			"_Inline image rendering isn't supported inside the floating drawer_",
-			"_(pi draws images in the main transcript, not in overlays). Open the file_",
-			"_in your OS image viewer to see it._",
+			"_The image is shown below the editor ↓ (pi can only draw images in its_",
+			"_main flow, not inside a floating overlay). This tab holds its details._",
 		].join("\n");
-		return { title, kind: "image", content: card };
+		return { title, kind: "image", content: card, imageBase64: buf.toString("base64"), imageMime: mime };
 	}
 	if (size > MAX_PARSE_BYTES) {
 		return { title: `${title} · too large`, kind: "text", content: `File is ${(size / 1048576).toFixed(1)} MB — too large to preview safely.` };
@@ -475,23 +477,45 @@ export default function (pi: ExtensionAPI) {
 	let handle: OverlayHandle | null = null;
 	let tui: TUI | null = null;
 	let viewer: DrawerViewer | null = null;
+	let ui: { setWidget: (key: string, content: unknown, opts?: unknown) => void } | null = null;
 	const overlayOpts = { anchor: "right-center" as const, margin: 1, maxHeight: "100%" as const, width: MODE_PCT[mode] };
+	const IMG_WIDGET = "pi-lens-image";
 
 	const refresh = () => { viewer?.invalidate(); tui?.requestRender(); };
 	const isFocused = () => !!handle?.isFocused();
 
+	// Images can't render inside the overlay, so draw the active image in pi's
+	// linear flow as a belowEditor widget (same path pi uses for tool images).
+	const refreshImageWidget = () => {
+		if (!ui) return;
+		const tab = tabs[active];
+		if (tab && tab.data.kind === "image" && tab.data.imageBase64 && tab.data.imageMime) {
+			const b64 = tab.data.imageBase64, mime = tab.data.imageMime;
+			const maxW = Math.max(20, Math.min(90, (process.stdout.columns || 100) - 6));
+			ui.setWidget(
+				IMG_WIDGET,
+				(_tui: unknown, theme: Theme) => new Image(b64, mime, { fallbackColor: (s: string) => theme.fg("dim", s) }, { maxWidthCells: maxW }),
+				{ placement: "belowEditor" },
+			);
+		} else {
+			ui.setWidget(IMG_WIDGET, undefined);
+		}
+	};
+
 	const closeAll = () => {
+		ui?.setWidget(IMG_WIDGET, undefined);
 		handle?.hide();
 		handle = null; tui = null; viewer = null;
 		tabs.length = 0; active = 0;
 	};
-	const setActive = (i: number) => { active = i; refresh(); };
+	const setActive = (i: number) => { active = i; refresh(); refreshImageWidget(); };
 	const closeActiveTab = () => {
 		if (!tabs.length) return;
 		tabs.splice(active, 1);
 		if (!tabs.length) return closeAll();
 		if (active >= tabs.length) active = tabs.length - 1;
 		refresh();
+		refreshImageWidget();
 	};
 	const backToChat = () => { handle?.unfocus(); refresh(); };
 
@@ -500,7 +524,8 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const ensureOpen = (ctx: ExtensionCommandContext) => {
-		if (handle) { handle.focus(); refresh(); return; }
+		ui = ctx.ui as unknown as typeof ui;
+		if (handle) { handle.focus(); refresh(); refreshImageWidget(); return; }
 		overlayOpts.width = MODE_PCT[mode];
 		void ctx.ui.custom<{ closed: true }>(
 			(tuiArg, theme, _kb, _done) => {
@@ -510,6 +535,7 @@ export default function (pi: ExtensionAPI) {
 			},
 			{ overlay: true, overlayOptions: overlayOpts, onHandle: (h) => { handle = h; h.focus(); } },
 		);
+		refreshImageWidget();
 	};
 
 	pi.registerCommand("lens", {
