@@ -3,3 +3,4 @@ node_modules/
 .DS_Store
 dist/
 samples/x.pdf
+samples/pic.png
