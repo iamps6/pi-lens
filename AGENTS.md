@@ -15,8 +15,8 @@ installs: `pdfjs-dist` (pure JS) + optional `@napi-rs/canvas` (prebuilt native).
 index.ts            # entry for pi auto-discovery (~/.pi/agent/extensions/<dir>/index.ts)
                     #   → re-exports default from ./src/index.ts
 src/index.ts        # extension: commands, drawer UI, tabs, loaders
-src/pixels.ts       # media engine: half-block renderer, image decode, pdf.js text + page rasters
-samples/            # demo files for manual testing
+src/pixels.ts       # media engine: quadrant renderer, image decode, pdf.js text + page rasters
+samples/            # local-only test fixtures (gitignored, not shipped)
 package.json        # name, pi.extensions, deps (pdfjs-dist; optional @napi-rs/canvas)
 ```
 
@@ -118,12 +118,15 @@ Manual test in a pi session (symlink the repo into pi's extensions dir, or use
 
 ```
 /reload
-/lens samples/sample.md      # scroll
-/lens samples/sample.ts      # syntax highlighting
-/lens samples/dot.png        # image below editor
-/lens samples/sample.pdf     # extracted text
+/lens README.md              # markdown + scroll
+/lens src/index.ts           # syntax highlighting
+/lens <some .pdf>            # extracted text; v = visual pages; enter = peek
+/lens <some .png>            # quadrant thumbnail; enter = peek
 /lens-mode focus             # resize
 ```
+
+The `samples/` dir is gitignored — create local fixtures there freely; they
+will not ship.
 
 Type-check (after `npm install`): `npm run typecheck`.
 

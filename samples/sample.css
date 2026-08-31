@@ -1,6 +1,0 @@
-:root { --brand: #6c5ce7; }
-.tag {
-  color: var(--brand);
-  font-weight: 600;
-  padding: 4px 8px;
-}

@@ -68,12 +68,12 @@ cd pi-lens && npm install     # installs pdfjs-dist + optional @napi-rs/canvas
 | `v` | PDF: toggle text/visual page view | `n` / `p` | PDF visual: next/prev page |
 | `enter` / `o` | **peek**: open in the OS previewer — Quick Look on macOS (esc closes) | | |
 
-Try it with the bundled samples:
+Try it on any file:
 
 ```
-/lens samples/sample.md
-/lens samples/sample.pdf
-/lens samples/dot.png
+/lens README.md
+/lens ~/Documents/some-report.pdf
+/lens ~/Pictures/photo.png
 /lens-mode focus
 ```
 
