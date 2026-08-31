@@ -29,7 +29,7 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { getLanguageFromPath, getMarkdownTheme, highlightCode } from "@earendil-works/pi-coding-agent";
-import { extractPdfTextRich, hasCanvas, renderImageCells, renderPdfPageCells } from "./pixels.ts";
+import { extractPdfTextRich, hasCanvas, MAX_VISUAL_PAGES, renderImageCells, renderPdfPagePng, renderPdfPages } from "./pixels.ts";
 import {
 	getImageDimensions,
 	Image,
@@ -254,7 +254,8 @@ interface Tab {
 	view: "text" | "visual";
 	page: number;
 	pageCount: number;
-	pixels?: { lines: string[]; forWidth: number; forPage: number };
+	pixels?: { lines: string[]; forWidth: number; pageOffsets?: number[] };
+	visualGen?: number;
 	/** hi-res PNG (image file or rendered PDF page) for the belowEditor widget */
 	pngB64?: string;
 	pngMime?: string;
@@ -274,10 +275,20 @@ interface DrawerHooks {
 	backToChat: () => void;
 	refresh: () => void;
 	isFocused: () => boolean;
-	/** Kick an async half-block render for a visual tab (image / pdf page). */
+	/** Kick an async pixel render for a visual tab (image / pdf pages). */
 	requestVisual: (tab: Tab, innerW: number) => void;
 	toggleView: (tab: Tab) => void;
-	setPage: (tab: Tab, page: number) => void;
+	/** Jump one page forward/back in a PDF visual strip. */
+	pageJump: (tab: Tab, dir: 1 | -1) => void;
+}
+
+/** Derive the current page from scroll position within a visual strip. */
+function pageFromScroll(tab: Tab): number {
+	const offs = tab.pixels?.pageOffsets;
+	if (!offs || !offs.length) return 1;
+	let page = 1;
+	for (let i = 0; i < offs.length; i++) if (tab.scroll >= (offs[i] ?? 0)) page = i + 1;
+	return page;
 }
 
 const BRAND = "pi-lens";
@@ -301,11 +312,11 @@ class DrawerViewer {
 			if (tab.visualError) {
 				return [this.theme.fg("error", tab.visualError), "", this.theme.fg("dim", "press v for text view")];
 			}
-			if (tab.pixels && tab.pixels.forWidth === innerW && tab.pixels.forPage === tab.page) {
+			if (tab.pixels && tab.pixels.forWidth === innerW) {
 				return tab.pixels.lines;
 			}
 			this.h.requestVisual(tab, innerW);
-			return [this.theme.fg("dim", tab.pageCount ? `rendering page ${tab.page}/${tab.pageCount}…` : "rendering…")];
+			return [this.theme.fg("dim", tab.pageCount ? `rendering ${tab.pageCount} pages…` : "rendering…")];
 		}
 
 		const key = `${data.title}|${data.kind}|${innerW}x${contentRows}`;
@@ -369,7 +380,7 @@ class DrawerViewer {
 		// Footer: └─ hints ────[ 42% ]┘
 		const pct = all.length <= contentRows ? 100 : Math.round((tab.scroll / maxScroll) * 100);
 		const isPdf = tab.data.kind === "pdf" && tab.pageCount > 0;
-		const right = tab.view === "visual" && isPdf ? `pg ${tab.page}/${tab.pageCount}` : `${pct}%`;
+		const right = tab.view === "visual" && isPdf ? `pg ${pageFromScroll(tab)}/${tab.pageCount}` : `${pct}%`;
 		const hintsFull = focused
 			? isPdf
 				? tab.view === "visual"
@@ -412,8 +423,8 @@ class DrawerViewer {
 		// PDF: v toggles text/visual; n/p page nav in visual view
 		if (data === "v" && tab.data.kind === "pdf" && tab.pageCount > 0) return this.h.toggleView(tab);
 		if (tab.data.kind === "pdf" && tab.view === "visual") {
-			if (data === "n") return this.h.setPage(tab, tab.page + 1);
-			if (data === "p") return this.h.setPage(tab, tab.page - 1);
+			if (data === "n") return this.h.pageJump(tab, 1);
+			if (data === "p") return this.h.pageJump(tab, -1);
 		}
 
 		if (matchesKey(data, "up") || data === "k") tab.scroll -= 1;
@@ -552,26 +563,42 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	// Async half-block renderer for visual tabs (images & PDF pages).
+	// Async pixel renderer for visual tabs. Images render in one shot; PDFs
+	// render page-by-page into one continuous scrollable strip (progressive).
 	const visualJobs = new Set<string>();
 	const requestVisual = (tab: Tab, innerW: number) => {
-		const key = `${tab.path}@${innerW}@${tab.page}`;
+		const key = `${tab.path}@${innerW}`;
 		if (visualJobs.has(key)) return;
 		visualJobs.add(key);
+		const gen = (tab.visualGen = (tab.visualGen ?? 0) + 1);
 		void (async () => {
 			try {
 				if (tab.data.kind === "image") {
 					const r = await renderImageCells(tab.path, innerW);
-					if (r) tab.pixels = { lines: r.lines, forWidth: innerW, forPage: tab.page };
+					if (tab.visualGen !== gen) return;
+					if (r) tab.pixels = { lines: r.lines, forWidth: innerW };
 					else { tab.visualError = "image decode unavailable (@napi-rs/canvas not installed)"; tab.view = "text"; }
 				} else if (tab.data.kind === "pdf") {
-					const r = await renderPdfPageCells(tab.path, tab.page, innerW);
-					if (r) {
-						tab.pixels = { lines: r.lines, forWidth: innerW, forPage: tab.page };
-						tab.pageCount = r.pageCount;
-						tab.pngB64 = r.pngB64;
-						tab.pngMime = "image/png";
-					} else { tab.visualError = "page render unavailable (@napi-rs/canvas not installed)"; tab.view = "text"; }
+					const lines: string[] = [];
+					const offsets: number[] = [];
+					const count = await renderPdfPages(tab.path, innerW, (pageLines, pageNum, pageCount) => {
+						if (tab.visualGen !== gen) return;
+						if (pageNum > 1) lines.push(`\x1b[2m── page ${pageNum}/${pageCount} ──\x1b[22m`);
+						offsets.push(pageNum > 1 ? lines.length - 1 : 0);
+						lines.push(...pageLines);
+						tab.pixels = { lines: [...lines], forWidth: innerW, pageOffsets: [...offsets] };
+						tab.pageCount = pageCount;
+						refresh();
+					});
+					if (tab.visualGen !== gen) return;
+					if (count === null) { tab.visualError = "page render unavailable (@napi-rs/canvas not installed)"; tab.view = "text"; }
+					else if (count > MAX_VISUAL_PAGES) {
+						lines.push(`\x1b[2m… ${count - MAX_VISUAL_PAGES} more pages (open in text view for all content)\x1b[22m`);
+						tab.pixels = { lines: [...lines], forWidth: innerW, pageOffsets: [...offsets] };
+					}
+					// hi-res companion: current page
+					const png = await renderPdfPagePng(tab.path, pageFromScroll(tab));
+					if (png && tab.visualGen === gen) { tab.pngB64 = png.pngB64; tab.pngMime = "image/png"; }
 				}
 			} catch (e) {
 				tab.visualError = `render failed: ${(e as Error).message}`;
@@ -589,12 +616,17 @@ export default function (pi: ExtensionAPI) {
 		refresh();
 		refreshHifiWidget();
 	};
-	const setPage = (tab: Tab, page: number) => {
-		const clamped = Math.min(Math.max(1, page), Math.max(1, tab.pageCount));
-		if (clamped === tab.page) return;
-		tab.page = clamped;
-		tab.scroll = 0;
+	const pageJump = (tab: Tab, dir: 1 | -1) => {
+		const offs = tab.pixels?.pageOffsets;
+		if (!offs || !offs.length) return;
+		const target = Math.min(Math.max(1, pageFromScroll(tab) + dir), offs.length);
+		tab.scroll = offs[target - 1] ?? 0;
+		tab.page = target;
 		refresh();
+		// update hi-res companion for the new page
+		void renderPdfPagePng(tab.path, target).then((png) => {
+			if (png) { tab.pngB64 = png.pngB64; tab.pngMime = "image/png"; refreshHifiWidget(); }
+		});
 	};
 
 	const closeAll = () => {
@@ -616,7 +648,7 @@ export default function (pi: ExtensionAPI) {
 
 	const hooks: DrawerHooks = {
 		tabs: () => tabs, active: () => active, setActive, closeActiveTab, closeAll, backToChat, refresh, isFocused,
-		requestVisual, toggleView, setPage,
+		requestVisual, toggleView, pageJump,
 	};
 
 	const ensureOpen = (ctx: ExtensionCommandContext) => {

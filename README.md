@@ -17,7 +17,7 @@ without leaving the terminal.
 - **Markdown** — rendered with headings, tables, and syntax-highlighted code
 - **Code** — syntax-highlighted with line numbers (`.ts` `.js` `.html` `.css` `.py` and many more)
 - **PDF** — full text extraction via pdf.js, **plus visual page mode** (`v`): pages
-  render as pixels *inside the drawer*, with `n`/`p` page navigation
+  render as one continuous scrollable strip *inside the drawer* (`n`/`p` jump pages)
 - **Images** — rendered as pixels **inside the drawer** (ANSI half-blocks, any
   truecolor terminal), plus a hi-res companion below the editor via your
   terminal's image protocol (iTerm2, Kitty, Ghostty, WezTerm, Warp)
@@ -97,15 +97,15 @@ Try it with the bundled samples:
 
 ## How visuals work
 
-Images and PDF pages are converted to pixels and rendered as **ANSI half-block
-characters** (`▀` with truecolor fg/bg = 2 pixels per cell) — plain styled text
+Images and PDF pages are converted to pixels and rendered as **ANSI quadrant-block
+characters** (▘▝▞▛… with truecolor fg/bg = 2×2 pixels per cell, chafa-style) — plain styled text
 that works inside the drawer with scrolling, tabs, and borders, in any truecolor
 terminal. A **hi-res companion** of the active visual also renders below the
 editor using the native image protocol where supported.
 
 ## Limitations
 
-- Half-block resolution is drawer-width × 2·rows pixels — great for photos,
+- Quadrant resolution is 2·drawer-width × 2·rows pixels — great for photos,
   charts, and page layout; fine print on dense PDF pages is best read in text
   view (`v` toggles).
 - **Scanned/image-only PDFs** have no text layer; use visual mode (`v`) to view

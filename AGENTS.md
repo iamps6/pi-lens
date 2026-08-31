@@ -50,7 +50,7 @@ Keep both in sync.
 - **Code highlighting** — `highlightSource()` uses pi's `highlightCode()` and
   adds line-number gutter + soft wrap.
 - **Visuals (the key architecture)** — images & PDF pages are converted to pixels
-  and rendered as **ANSI half-blocks** (`▀` truecolor fg/bg = 2px per cell) in
+  and rendered as **ANSI quadrant blocks** (▘▝▞▛… truecolor fg/bg, 2×2 px per cell) in
   `src/pixels.ts`. Half-blocks are plain styled text → they work *inside* the
   overlay drawer (scroll/tabs/borders), unlike pi's `Image` component (see
   gotchas). Rendering is async: `contentLines()` returns "rendering…" and calls
@@ -58,8 +58,9 @@ Keep both in sync.
   and calls `refresh()` when done.
 - **PDF** — text view uses `extractPdfTextRich()` (pdf.js `getTextContent`, handles
   encodings/CMaps); falls back to the legacy zero-dep `extractPdfText()` (zlib
-  `BT…ET` scan) when pdfjs-dist is missing. Visual view (`v`) rasterizes pages
-  via pdf.js + canvas; `n`/`p` navigate; last doc is cached in pixels.ts.
+  `BT…ET` scan) when pdfjs-dist is missing. Visual view (`v`) renders ALL pages
+  progressively into one continuous scrollable strip (quadrant blocks, 2x2 px
+  per cell); `n`/`p` jump between pages via pageOffsets; last doc cached in pixels.ts.
 - **Hi-res companion** — the active visual (image file or rendered PDF page PNG)
   is also drawn `belowEditor` via `ui.setWidget` + pi's `Image` component (native
   protocol, readable fine print). `refreshHifiWidget()` syncs it; cleared on close.

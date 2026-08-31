@@ -1,12 +1,16 @@
 /**
  * pixels.ts — pi-lens media engine
  *
- * Converts visual content (images, PDF pages) into ANSI half-block text lines
- * (`▀` with truecolor fg/bg = 2 vertical pixels per cell). Half-blocks are plain
- * styled text, so they render correctly anywhere in the TUI — including inside
- * the floating drawer overlay, with scrolling, tabs, and borders.
+ * Converts visual content (images, PDF pages) into ANSI block-character text
+ * lines. Block characters are plain styled text, so they render correctly
+ * anywhere in the TUI — including inside the floating drawer overlay, with
+ * scrolling, tabs, and borders.
  *
- * Dependencies (both feature-detected; everything degrades gracefully):
+ * Rendering uses QUADRANT blocks (▘▝▀▖▌▞▛▗▚▐▜▄▙▟█): each terminal cell carries
+ * a 2×2 pixel block with 2 colors chosen by clustering — double the horizontal
+ * resolution of naive half-blocks (the technique used by chafa).
+ *
+ * Dependencies (feature-detected; everything degrades gracefully):
  *  - pdfjs-dist       (pure JS)                → proper PDF text + page rasters
  *  - @napi-rs/canvas  (prebuilt native, npm)   → image decode + PDF page pixels
  */
@@ -50,12 +54,22 @@ export async function hasPdfjs(): Promise<boolean> {
 	return (await getPdfjs()) !== null;
 }
 
-// ── half-block renderer ─────────────────────────────────────────────────────
+// ── quadrant-block renderer ─────────────────────────────────────────────────
 const BG = 30; // blend transparent pixels onto dark gray
 
-/** Convert RGBA pixels to ANSI half-block lines (2 pixels per row of cells). */
-export function halfBlocks(data: Uint8ClampedArray | Uint8Array, w: number, h: number): string[] {
-	const px = (x: number, y: number): [number, number, number] => {
+// glyph by 4-bit mask: bit0=TL bit1=TR bit2=BL bit3=BR (bit set = fg)
+const QUAD = [" ", "▘", "▝", "▀", "▖", "▌", "▞", "▛", "▗", "▚", "▐", "▜", "▄", "▙", "▟", "█"];
+
+type RGB = [number, number, number];
+
+/**
+ * Render RGBA pixels as quadrant-block lines. `w` should be 2×cols, `h` is
+ * arbitrary (2 pixel rows per cell row). Each cell picks the best 2-color
+ * approximation of its 2×2 pixel block.
+ */
+export function quadrantBlocks(data: Uint8ClampedArray | Uint8Array, w: number, h: number): string[] {
+	const px = (x: number, y: number): RGB => {
+		if (x >= w || y >= h) return [BG, BG, BG];
 		const i = (y * w + x) * 4;
 		const a = (data[i + 3] ?? 0) / 255;
 		return [
@@ -64,19 +78,43 @@ export function halfBlocks(data: Uint8ClampedArray | Uint8Array, w: number, h: n
 			Math.round((data[i + 2] ?? 0) * a + BG * (1 - a)),
 		];
 	};
+	const d2 = (a: RGB, b: RGB) => {
+		const dr = a[0] - b[0], dg = a[1] - b[1], db = a[2] - b[2];
+		return dr * dr + dg * dg + db * db;
+	};
+	const avg = (cs: RGB[]): RGB => {
+		if (!cs.length) return [BG, BG, BG];
+		let r = 0, g = 0, b = 0;
+		for (const c of cs) { r += c[0]; g += c[1]; b += c[2]; }
+		return [Math.round(r / cs.length), Math.round(g / cs.length), Math.round(b / cs.length)];
+	};
+
+	const cols = Math.ceil(w / 2);
 	const lines: string[] = [];
-	for (let y = 0; y < h; y += 2) {
+	for (let cy = 0; cy * 2 < h; cy++) {
 		let line = "";
 		let prevFg = "", prevBg = "";
-		for (let x = 0; x < w; x++) {
-			const [tr, tg, tb] = px(x, y);
-			const hasBottom = y + 1 < h;
-			const [br, bg, bb] = hasBottom ? px(x, y + 1) : [BG, BG, BG];
-			const fg = `${tr};${tg};${tb}`;
-			const bgc = `${br};${bg};${bb}`;
-			if (fg !== prevFg) { line += `\x1b[38;2;${fg}m`; prevFg = fg; }
-			if (bgc !== prevBg) { line += `\x1b[48;2;${bgc}m`; prevBg = bgc; }
-			line += "▀";
+		for (let cx = 0; cx < cols; cx++) {
+			const p: RGB[] = [px(cx * 2, cy * 2), px(cx * 2 + 1, cy * 2), px(cx * 2, cy * 2 + 1), px(cx * 2 + 1, cy * 2 + 1)];
+			// seeds: the most distant pair among the 4 subpixels
+			let si = 0, sj = 1, best = -1;
+			for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) {
+				const d = d2(p[i]!, p[j]!);
+				if (d > best) { best = d; si = i; sj = j; }
+			}
+			let mask = 0;
+			const fgList: RGB[] = [], bgList: RGB[] = [];
+			for (let i = 0; i < 4; i++) {
+				if (d2(p[i]!, p[si]!) <= d2(p[i]!, p[sj]!)) { mask |= 1 << i; fgList.push(p[i]!); }
+				else bgList.push(p[i]!);
+			}
+			let fg = avg(fgList), bg = avg(bgList);
+			if (mask === 15) { bg = fg; } // uniform cell
+			const fgS = `${fg[0]};${fg[1]};${fg[2]}`;
+			const bgS = `${bg[0]};${bg[1]};${bg[2]}`;
+			if (fgS !== prevFg) { line += `\x1b[38;2;${fgS}m`; prevFg = fgS; }
+			if (bgS !== prevBg) { line += `\x1b[48;2;${bgS}m`; prevBg = bgS; }
+			line += QUAD[mask];
 		}
 		lines.push(line + "\x1b[0m");
 	}
@@ -91,24 +129,31 @@ export interface CellsResult {
 }
 
 /**
- * Decode an image file and render it as half-block lines at `cols` cells wide.
- * Small images are upscaled at most 4x. Returns null if canvas is unavailable.
+ * Decode an image file and render it as quadrant-block lines at `cols` cells
+ * wide (2×cols pixels). Small images upscale at most 4x. Null if no canvas.
  */
 export async function renderImageCells(path: string, cols: number): Promise<CellsResult | null> {
 	const c = await getCanvas();
 	if (!c) return null;
 	const img = await c.loadImage(path);
-	const w = Math.max(1, Math.min(cols, img.width * 4));
-	const h = Math.max(1, Math.round((w * img.height) / img.width));
+	// target pixel grid: 2 px per cell horizontally; pixel aspect ≈ 1:2 (tall),
+	// so vertical pixel count is halved to keep the image aspect correct.
+	let w = Math.max(2, Math.min(cols * 2, img.width * 4));
+	w += w % 2;
+	let h = Math.max(2, Math.round((w * img.height) / img.width / 2));
+	h += h % 2;
 	const canvas = c.createCanvas(w, h);
 	const ctx = canvas.getContext("2d");
+	ctx.imageSmoothingEnabled = true;
+	ctx.imageSmoothingQuality = "high";
 	ctx.drawImage(img, 0, 0, w, h);
 	const data = ctx.getImageData(0, 0, w, h).data;
-	return { lines: halfBlocks(data, w, h), pxW: w, pxH: h };
+	return { lines: quadrantBlocks(data, w, h), pxW: w, pxH: h };
 }
 
 // ── PDFs ────────────────────────────────────────────────────────────────────
 const MAX_PDF_TEXT = 400_000;
+export const MAX_VISUAL_PAGES = 40;
 
 // cache the last opened document (page navigation re-uses it)
 let docCache: { path: string; doc: any } | null = null;
@@ -132,7 +177,7 @@ export interface PdfText {
 	text: string;
 }
 
-/** Proper text extraction via pdf.js (handles encodings my zlib hack cannot). */
+/** Proper text extraction via pdf.js (handles encodings the zlib hack cannot). */
 export async function extractPdfTextRich(path: string): Promise<PdfText | null> {
 	const doc = await openDoc(path);
 	if (!doc) return null;
@@ -155,46 +200,65 @@ export async function extractPdfTextRich(path: string): Promise<PdfText | null> 
 	return { pageCount: doc.numPages, text: parts.join("\n\n") };
 }
 
-export interface PageRender extends CellsResult {
-	pageCount: number;
-	pngB64: string; // hi-res PNG of the page for the belowEditor widget
+async function rasterPageCanvas(c: any, page: any, pixelWidth: number): Promise<any> {
+	const vp1 = page.getViewport({ scale: 1 });
+	const scale = pixelWidth / vp1.width;
+	const vp = page.getViewport({ scale });
+	const canvas = c.createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
+	const ctx = canvas.getContext("2d");
+	ctx.imageSmoothingEnabled = true;
+	ctx.imageSmoothingQuality = "high";
+	ctx.fillStyle = "#ffffff";
+	ctx.fillRect(0, 0, canvas.width, canvas.height);
+	await page.render({ canvasContext: ctx, viewport: vp, canvas }).promise;
+	return canvas;
 }
 
-/** Rasterize one PDF page → half-block lines at `cols` wide + a hi-res PNG. */
-export async function renderPdfPageCells(path: string, pageNum: number, cols: number): Promise<PageRender | null> {
+/**
+ * Render PDF pages progressively as quadrant-block lines at `cols` cells wide.
+ * Calls `onPage(lines, pageNum, pageCount)` after each page. Returns pageCount
+ * (or null if canvas/pdfjs unavailable). Renders at most MAX_VISUAL_PAGES.
+ */
+export async function renderPdfPages(
+	path: string,
+	cols: number,
+	onPage: (lines: string[], pageNum: number, pageCount: number) => void,
+): Promise<number | null> {
+	const c = await getCanvas();
+	const doc = await openDoc(path);
+	if (!c || !doc) return null;
+	// PDF pages: pixel aspect 1:2 → halve vertical resolution relative to width.
+	const pixelW = Math.max(20, cols * 2);
+	const n = Math.min(doc.numPages, MAX_VISUAL_PAGES);
+	for (let p = 1; p <= n; p++) {
+		const page = await doc.getPage(p);
+		const full = await rasterPageCanvas(c, page, pixelW);
+		// vertical squeeze to half height (pixel aspect is 1:2 in quadrant cells)
+		const sq = c.createCanvas(full.width, Math.max(2, Math.round(full.height / 2)));
+		const sctx = sq.getContext("2d");
+		sctx.imageSmoothingEnabled = true;
+		sctx.imageSmoothingQuality = "high";
+		sctx.drawImage(full, 0, 0, full.width, full.height, 0, 0, sq.width, sq.height);
+		const d = sctx.getImageData(0, 0, sq.width, sq.height).data;
+		onPage(quadrantBlocks(d, sq.width, sq.height), p, doc.numPages);
+	}
+	return doc.numPages;
+}
+
+/** Hi-res PNG of a single page (for the belowEditor native-protocol widget). */
+export async function renderPdfPagePng(path: string, pageNum: number): Promise<{ pngB64: string; pageCount: number } | null> {
 	const c = await getCanvas();
 	const doc = await openDoc(path);
 	if (!c || !doc) return null;
 	const n = Math.min(Math.max(1, pageNum), doc.numPages);
 	const page = await doc.getPage(n);
 	const vp1 = page.getViewport({ scale: 1 });
-
-	// half-block raster at drawer width (rows = pxH / 2)
-	const w = Math.max(10, cols);
-	const scale = w / vp1.width;
+	const scale = Math.min(1600 / vp1.width, 4);
 	const vp = page.getViewport({ scale });
 	const canvas = c.createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
 	const ctx = canvas.getContext("2d");
 	ctx.fillStyle = "#ffffff";
 	ctx.fillRect(0, 0, canvas.width, canvas.height);
 	await page.render({ canvasContext: ctx, viewport: vp, canvas }).promise;
-	const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-
-	// hi-res PNG for the native-protocol widget (readable text)
-	const pngScale = Math.min(1600 / vp1.width, 4);
-	const vpx = page.getViewport({ scale: pngScale });
-	const big = c.createCanvas(Math.ceil(vpx.width), Math.ceil(vpx.height));
-	const bctx = big.getContext("2d");
-	bctx.fillStyle = "#ffffff";
-	bctx.fillRect(0, 0, big.width, big.height);
-	await page.render({ canvasContext: bctx, viewport: vpx, canvas: big }).promise;
-	const pngB64 = big.toBuffer("image/png").toString("base64");
-
-	return {
-		lines: halfBlocks(data, canvas.width, canvas.height),
-		pxW: canvas.width,
-		pxH: canvas.height,
-		pageCount: doc.numPages,
-		pngB64,
-	};
+	return { pngB64: canvas.toBuffer("image/png").toString("base64"), pageCount: doc.numPages };
 }
