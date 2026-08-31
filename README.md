@@ -8,15 +8,7 @@ PDFs, and images — plus a one-key **peek** that opens the OS-native previewer
 (Quick Look on macOS) for pixel-perfect viewing. The drawer stays open while you
 keep chatting with pi.
 
-```
-┌─ pi-lens ┃ 1·notes.md │ 2·report.pdf │ 3·chart.png ────────┐
-│                                                            │
-│   # Notes                                                  │
-│   Rendered markdown, highlighted code, PDF pages,          │
-│   image thumbnails — scrollable, tabbed, resizable.        │
-│                                                            │
-└─ ↵ peek · ↑↓ scroll · ←→ tabs · w close · q quit ──── 42% ─┘
-```
+![pi-lens](https://raw.githubusercontent.com/iamps6/pi-lens/main/docs/preview.png)
 
 ## Features
 
