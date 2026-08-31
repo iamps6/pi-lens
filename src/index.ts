@@ -18,6 +18,7 @@
  * Zero system dependencies. PDF uses node:zlib for FlateDecode text extraction.
  */
 
+import { spawn } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -29,10 +30,9 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { getLanguageFromPath, getMarkdownTheme, highlightCode } from "@earendil-works/pi-coding-agent";
-import { extractPdfTextRich, hasCanvas, MAX_VISUAL_PAGES, renderImageCells, renderPdfPagePng, renderPdfPages } from "./pixels.ts";
+import { extractPdfTextRich, hasCanvas, MAX_VISUAL_PAGES, renderImageCells, renderPdfPages } from "./pixels.ts";
 import {
 	getImageDimensions,
-	Image,
 	Key,
 	Markdown,
 	matchesKey,
@@ -185,8 +185,6 @@ interface Loaded {
 	kind: Kind;
 	content: string;
 	lang?: string;
-	imageBase64?: string;
-	imageMime?: string;
 }
 
 function fmtBytes(n: number): string {
@@ -215,7 +213,7 @@ async function load(path: string): Promise<{ data: Loaded; pageCount: number; st
 		].join("\n");
 		const visual = await hasCanvas();
 		return {
-			data: { title, kind: "image", content: card, imageBase64: buf.toString("base64"), imageMime: mime },
+			data: { title, kind: "image", content: card },
 			pageCount: 0,
 			startVisual: visual,
 		};
@@ -256,9 +254,6 @@ interface Tab {
 	pageCount: number;
 	pixels?: { lines: string[]; forWidth: number; pageOffsets?: number[] };
 	visualGen?: number;
-	/** hi-res PNG (image file or rendered PDF page) for the belowEditor widget */
-	pngB64?: string;
-	pngMime?: string;
 	visualError?: string;
 }
 
@@ -280,8 +275,8 @@ interface DrawerHooks {
 	toggleView: (tab: Tab) => void;
 	/** Jump one page forward/back in a PDF visual strip. */
 	pageJump: (tab: Tab, dir: 1 | -1) => void;
-	/** Open the fullscreen pixel-perfect viewer for the tab's current visual. */
-	openFull: (tab: Tab) => void;
+	/** Open the file in the OS-native previewer (Quick Look on macOS). */
+	openPeek: (tab: Tab) => void;
 }
 
 /** Derive the current page from scroll position within a visual strip. */
@@ -386,11 +381,11 @@ class DrawerViewer {
 		const hintsFull = focused
 			? isPdf
 				? tab.view === "visual"
-					? "enter full-res · n/p pages · v text · ↑↓ scroll · q quit"
-					: "v visual · ↑↓ scroll · ←→ tabs · w close · q quit"
+					? "↵ peek · n/p pages · v text · ↑↓ scroll · q quit"
+					: "↵ peek · v visual · ↑↓ scroll · w close · q quit"
 				: tab.view === "visual"
-					? "enter full-res · ←→ tabs · w close · q quit"
-					: "↑↓ scroll · ←→ tabs · w close tab · ctrl+shift+l chat · q quit"
+					? "↵ peek · ←→ tabs · w close · q quit"
+					: "↵ peek · ↑↓ scroll · ←→ tabs · w close · ctrl+shift+l chat · q quit"
 			: "ctrl+shift+l to focus";
 		const hints = truncate(hintsFull, Math.max(0, cols - 7 - right.length - 4));
 		const fdash = Math.max(0, cols - 3 - visibleWidth(hints) - 1 - 1 - right.length - 2);
@@ -430,8 +425,8 @@ class DrawerViewer {
 			if (data === "n") return this.h.pageJump(tab, 1);
 			if (data === "p") return this.h.pageJump(tab, -1);
 		}
-		// Fullscreen pixel-perfect viewer for visuals
-		if ((matchesKey(data, "enter") || data === "o") && tab.view === "visual") return this.h.openFull(tab);
+		// OS-native peek (Quick Look on macOS) — works for any real file
+		if ((matchesKey(data, "enter") || data === "o") && tab.path !== WELCOME_PATH) return this.h.openPeek(tab);
 
 		if (matchesKey(data, "up") || data === "k") tab.scroll -= 1;
 		else if (matchesKey(data, "down") || data === "j") tab.scroll += 1;
@@ -445,56 +440,6 @@ class DrawerViewer {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
-/**
- * Fullscreen pixel-perfect viewer. Runs as a NON-overlay custom component —
- * pi's main linear flow — so the native image protocol renders at full
- * resolution (crisp in iTerm2/Kitty/Ghostty/WezTerm), unlike the drawer overlay.
- */
-class FullViewer {
-	private img: Image | null = null;
-	private imgFor = "";
-
-	constructor(
-		private theme: Theme,
-		private tab: Tab,
-		private cb: { close: () => void; pageJump: (dir: 1 | -1) => void },
-	) {}
-
-	private currentB64(): { b64?: string; mime: string } {
-		if (this.tab.data.kind === "image") return { b64: this.tab.data.imageBase64, mime: this.tab.data.imageMime ?? "image/png" };
-		return { b64: this.tab.pngB64, mime: this.tab.pngMime ?? "image/png" };
-	}
-
-	render(width: number): string[] {
-		const t = this.theme;
-		const rows = Math.max(10, (process.stdout.rows || 40) - 2);
-		const { b64, mime } = this.currentB64();
-		const isPdf = this.tab.data.kind === "pdf";
-		const pg = isPdf ? ` · pg ${this.tab.page}/${this.tab.pageCount}` : "";
-		const header = t.fg("accent", t.bold(` ${BRAND} · ${this.tab.data.title}${pg}`));
-		const hints = t.fg("dim", isPdf ? " n/p pages · esc/q back" : " esc/q back");
-		if (!b64) return [header, "", t.fg("dim", " rendering…"), hints];
-		if (this.imgFor !== b64) {
-			this.img = new Image(b64, mime, { fallbackColor: (s: string) => this.theme.fg("dim", s) }, { maxWidthCells: Math.max(20, width - 2), maxHeightCells: rows - 2 });
-			this.imgFor = b64;
-		}
-		return [header, ...(this.img?.render(width) ?? []), hints];
-	}
-
-	invalidate(): void {
-		this.img?.invalidate();
-		this.imgFor = "";
-	}
-
-	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || data === "q" || matchesKey(data, "enter")) return this.cb.close();
-		if (this.tab.data.kind === "pdf") {
-			if (data === "n") return this.cb.pageJump(1);
-			if (data === "p") return this.cb.pageJump(-1);
-		}
-	}
-}
-
 function buildTabBar(tabs: Tab[], active: number, budget: number, t: Theme): { text: string; width: number } {
 	const labels = tabs.map((tab, i) => truncate(`${i + 1}·${tab.data.title}`, 22));
 	const w = labels.map((l) => visibleWidth(l));
@@ -593,31 +538,19 @@ export default function (pi: ExtensionAPI) {
 	let handle: OverlayHandle | null = null;
 	let tui: TUI | null = null;
 	let viewer: DrawerViewer | null = null;
-	let ui: { setWidget: (key: string, content: unknown, opts?: unknown) => void } | null = null;
-	let uiCustom: (<T>(factory: (tui: TUI, theme: Theme, kb: unknown, done: (r: T) => void) => unknown, opts?: unknown) => Promise<T>) | null = null;
 	const overlayOpts = { anchor: "right-center" as const, margin: 1, maxHeight: "100%" as const, width: MODE_PCT[mode] };
-	const IMG_WIDGET = "pi-lens-image";
 
 	const refresh = () => { viewer?.invalidate(); tui?.requestRender(); };
 	const isFocused = () => !!handle?.isFocused();
 
-	// Hi-res companion: show the active visual (image file or rendered PDF page)
-	// below the editor via the native image protocol (pi's linear flow).
-	const refreshHifiWidget = () => {
-		if (!ui) return;
-		const tab = tabs[active];
-		const b64 = tab?.view === "visual" ? (tab.pngB64 ?? tab.data.imageBase64) : undefined;
-		const mime = tab?.pngMime ?? tab?.data.imageMime ?? "image/png";
-		if (tab && b64) {
-			const maxW = Math.max(20, Math.min(90, (process.stdout.columns || 100) - 6));
-			ui.setWidget(
-				IMG_WIDGET,
-				(_tui: unknown, theme: Theme) => new Image(b64, mime, { fallbackColor: (s: string) => theme.fg("dim", s) }, { maxWidthCells: maxW, maxHeightCells: 22 }),
-				{ placement: "belowEditor" },
-			);
-		} else {
-			ui.setWidget(IMG_WIDGET, undefined);
-		}
+	// OS-native previewer: pixel-perfect, instant, zero terminal-protocol pain.
+	// macOS: Quick Look floating panel (esc closes). Linux/Windows: default app.
+	const openPeek = (tab: Tab) => {
+		try {
+			if (process.platform === "darwin") spawn("qlmanage", ["-p", tab.path], { detached: true, stdio: "ignore" }).unref();
+			else if (process.platform === "win32") spawn("cmd", ["/c", "start", "", tab.path], { detached: true, stdio: "ignore" }).unref();
+			else spawn("xdg-open", [tab.path], { detached: true, stdio: "ignore" }).unref();
+		} catch { /* best effort */ }
 	};
 
 	// Async pixel renderer for visual tabs. Images render in one shot; PDFs
@@ -653,16 +586,12 @@ export default function (pi: ExtensionAPI) {
 						lines.push(`\x1b[2m… ${count - MAX_VISUAL_PAGES} more pages (open in text view for all content)\x1b[22m`);
 						tab.pixels = { lines: [...lines], forWidth: innerW, pageOffsets: [...offsets] };
 					}
-					// hi-res companion: current page
-					const png = await renderPdfPagePng(tab.path, pageFromScroll(tab));
-					if (png && tab.visualGen === gen) { tab.pngB64 = png.pngB64; tab.pngMime = "image/png"; }
 				}
 			} catch (e) {
 				tab.visualError = `render failed: ${(e as Error).message}`;
 			} finally {
 				visualJobs.delete(key);
 				refresh();
-				refreshHifiWidget();
 			}
 		})();
 	};
@@ -671,68 +600,38 @@ export default function (pi: ExtensionAPI) {
 		tab.visualError = undefined;
 		tab.scroll = 0;
 		refresh();
-		refreshHifiWidget();
 	};
 	const pageJump = (tab: Tab, dir: 1 | -1) => {
 		const offs = tab.pixels?.pageOffsets;
-		const total = Math.max(1, tab.pageCount);
-		const target = Math.min(Math.max(1, (offs?.length ? pageFromScroll(tab) : tab.page) + dir), offs?.length ? offs.length : total);
-		if (offs?.length) tab.scroll = offs[target - 1] ?? 0;
+		if (!offs || !offs.length) return;
+		const target = Math.min(Math.max(1, pageFromScroll(tab) + dir), offs.length);
+		tab.scroll = offs[target - 1] ?? 0;
 		tab.page = target;
 		refresh();
-		// update hi-res image (companion widget + fullscreen viewer) for the new page
-		void renderPdfPagePng(tab.path, target).then((png) => {
-			if (png) { tab.pngB64 = png.pngB64; tab.pngMime = "image/png"; refreshHifiWidget(); refresh(); }
-		});
-	};
-
-	let fullOpen = false;
-	const openFull = (tab: Tab) => {
-		if (!uiCustom || fullOpen) return;
-		fullOpen = true;
-		tab.page = pageFromScroll(tab);
-		// hide the drawer overlay so it doesn't cover the fullscreen image
-		handle?.setHidden(true);
-		void (async () => {
-			try {
-				await uiCustom!((_tui, theme, _kb, done) =>
-					new FullViewer(theme, tab, { close: () => done(undefined), pageJump: (d) => pageJump(tab, d) }),
-				);
-			} finally {
-				fullOpen = false;
-				handle?.setHidden(false);
-				handle?.focus();
-				refresh();
-			}
-		})();
 	};
 
 	const closeAll = () => {
-		ui?.setWidget(IMG_WIDGET, undefined);
 		handle?.hide();
 		handle = null; tui = null; viewer = null;
 		tabs.length = 0; active = 0;
 	};
-	const setActive = (i: number) => { active = i; refresh(); refreshHifiWidget(); };
+	const setActive = (i: number) => { active = i; refresh(); };
 	const closeActiveTab = () => {
 		if (!tabs.length) return;
 		tabs.splice(active, 1);
 		if (!tabs.length) return closeAll();
 		if (active >= tabs.length) active = tabs.length - 1;
 		refresh();
-		refreshHifiWidget();
 	};
 	const backToChat = () => { handle?.unfocus(); refresh(); };
 
 	const hooks: DrawerHooks = {
 		tabs: () => tabs, active: () => active, setActive, closeActiveTab, closeAll, backToChat, refresh, isFocused,
-		requestVisual, toggleView, pageJump, openFull,
+		requestVisual, toggleView, pageJump, openPeek,
 	};
 
 	const ensureOpen = (ctx: ExtensionCommandContext) => {
-		ui = ctx.ui as unknown as typeof ui;
-		uiCustom = ctx.ui.custom.bind(ctx.ui) as unknown as typeof uiCustom;
-		if (handle) { handle.focus(); refresh(); refreshHifiWidget(); return; }
+		if (handle) { handle.focus(); refresh(); return; }
 		overlayOpts.width = MODE_PCT[mode];
 		void ctx.ui.custom<{ closed: true }>(
 			(tuiArg, theme, _kb, _done) => {
@@ -742,7 +641,6 @@ export default function (pi: ExtensionAPI) {
 			},
 			{ overlay: true, overlayOptions: overlayOpts, onHandle: (h) => { handle = h; h.focus(); } },
 		);
-		refreshHifiWidget();
 	};
 
 	pi.registerCommand("lens", {

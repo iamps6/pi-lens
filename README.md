@@ -19,8 +19,7 @@ without leaving the terminal.
 - **PDF** — full text extraction via pdf.js, **plus visual page mode** (`v`): pages
   render as one continuous scrollable strip *inside the drawer* (`n`/`p` jump pages)
 - **Images** — rendered as pixels **inside the drawer** (ANSI half-blocks, any
-  truecolor terminal), plus a hi-res companion below the editor via your
-  terminal's image protocol (iTerm2, Kitty, Ghostty, WezTerm, Warp)
+  truecolor terminal) for quick reference; press `enter` for a pixel-perfect Quick Look peek
 - **Tabbed side drawer** — open multiple files; switch between them as tabs
 - **Adjustable width** — Regular (50%) · Focus (70%) · Sideshow (30%)
 - **Stays open while you chat** — toggle focus in/out with a shortcut
@@ -67,7 +66,7 @@ cd pi-lens && npm install     # installs pdfjs-dist + optional @napi-rs/canvas
 | `g` / `G` | top / bottom | `w` | close current tab |
 | `ctrl+shift+l` | back to chat | `q` | close drawer |
 | `v` | PDF: toggle text/visual page view | `n` / `p` | PDF visual: next/prev page |
-| `enter` / `o` | **fullscreen pixel-perfect view** of the active visual (esc back) | | |
+| `enter` / `o` | **peek**: open in the OS previewer — Quick Look on macOS (esc closes) | | |
 
 Try it with the bundled samples:
 
@@ -101,8 +100,8 @@ Try it with the bundled samples:
 Images and PDF pages are converted to pixels and rendered as **ANSI quadrant-block
 characters** (▘▝▞▛… with truecolor fg/bg = 2×2 pixels per cell, chafa-style) — plain styled text
 that works inside the drawer with scrolling, tabs, and borders, in any truecolor
-terminal. A **hi-res companion** of the active visual also renders below the
-editor using the native image protocol where supported.
+terminal. For pixel-perfect viewing, `enter` opens the file in the OS-native previewer
+(Quick Look on macOS) — a floating panel over the terminal, `esc` closes it.
 
 ## Limitations
 
