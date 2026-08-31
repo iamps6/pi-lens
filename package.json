@@ -1,6 +1,6 @@
 {
   "name": "pi-lens",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The terminal previewer for pi — tabbed side drawer for markdown, syntax-highlighted code, images, and PDFs (text + visual pages).",
   "keywords": [
     "pi",
