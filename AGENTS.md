@@ -71,10 +71,20 @@ Keep both in sync.
 
 ## Gotchas / hard constraints
 
-- **Never put pi's `Image` component inside the overlay.** It uses cursor-movement
-  escapes that only work in the main linear flow; in a floating overlay they
-  corrupt the layout ("window inside a window"). In-drawer visuals must be
-  half-blocks (plain text); native-protocol images only via the belowEditor widget.
+- **Native raster protocols do not work on ANY extension surface.** User-verified
+  facts (iTerm2): pi's own transcript images render crisp (protocol + terminal
+  are fine), but pi's `Image` component corrupts layout in all three extension
+  surfaces we tried — drawer overlay, belowEditor widget, and fullscreen
+  `ui.custom` component. Root cause: OSC 1337/Kitty draw rasters at the cursor in
+  a linear append-only flow, while extension surfaces are *composited* (partial
+  line rewrites at arbitrary positions each frame) — cursor-move escapes land
+  wrong and partial updates slice the raster. Do not reintroduce `Image` anywhere
+  in this extension. Crisp viewing = OS peek (`enter`). Known future paths to
+  crisp-in-chat: (a) upstream pi API to append rich content to the transcript or
+  an image-safe overlay region; (b) register a tool whose result includes image
+  content — pi core renders tool-result images in the transcript (crisp), at the
+  cost of putting the image into LLM context (tokens + privacy; make it opt-in,
+  e.g. a `/lens-send` command).
 - **pdfjs-dist import**: use `pdfjs-dist/legacy/build/pdf.mjs` via dynamic import,
   and set `globalThis.DOMMatrix/Path2D/ImageData` from @napi-rs/canvas *before*
   importing it. `page.render({ canvasContext, viewport, canvas })` needs the
@@ -123,5 +133,8 @@ Type-check (after `npm install`): `npm run typecheck`.
   256-color quantization).
 - CSV/TSV table rendering.
 - Zoom for visual mode (render at 2x cols and pan horizontally).
-- Upstream request: a real split/reserve-column API in pi so the drawer can dock
-  beside the transcript instead of overlaying it.
+- Opt-in `/lens-send`: push the current visual into the chat as a tool-result
+  image → crisp in-transcript rendering (enters LLM context; document cost).
+- Upstream requests to pi: (1) split/reserve-column API so the drawer can dock
+  instead of overlaying; (2) extension API for appending rich (image) content to
+  the transcript, which would enable crisp in-chat viewing without Quick Look.
