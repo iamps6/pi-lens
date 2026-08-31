@@ -61,6 +61,10 @@ Keep both in sync.
   `BT…ET` scan) when pdfjs-dist is missing. Visual view (`v`) renders ALL pages
   progressively into one continuous scrollable strip (quadrant blocks, 2x2 px
   per cell); `n`/`p` jump between pages via pageOffsets; last doc cached in pixels.ts.
+- **FullViewer** — `enter`/`o` on a visual tab opens a fullscreen pixel-perfect
+  viewer: a NON-overlay `ui.custom` component (main linear flow), where pi's
+  `Image` component + native protocol render at full resolution. The drawer
+  overlay is `setHidden(true)` while open so it does not cover the image.
 - **Hi-res companion** — the active visual (image file or rendered PDF page PNG)
   is also drawn `belowEditor` via `ui.setWidget` + pi's `Image` component (native
   protocol, readable fine print). `refreshHifiWidget()` syncs it; cleared on close.

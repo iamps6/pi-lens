@@ -67,6 +67,7 @@ cd pi-lens && npm install     # installs pdfjs-dist + optional @napi-rs/canvas
 | `g` / `G` | top / bottom | `w` | close current tab |
 | `ctrl+shift+l` | back to chat | `q` | close drawer |
 | `v` | PDF: toggle text/visual page view | `n` / `p` | PDF visual: next/prev page |
+| `enter` / `o` | **fullscreen pixel-perfect view** of the active visual (esc back) | | |
 
 Try it with the bundled samples:
 

@@ -280,6 +280,8 @@ interface DrawerHooks {
 	toggleView: (tab: Tab) => void;
 	/** Jump one page forward/back in a PDF visual strip. */
 	pageJump: (tab: Tab, dir: 1 | -1) => void;
+	/** Open the fullscreen pixel-perfect viewer for the tab's current visual. */
+	openFull: (tab: Tab) => void;
 }
 
 /** Derive the current page from scroll position within a visual strip. */
@@ -384,9 +386,11 @@ class DrawerViewer {
 		const hintsFull = focused
 			? isPdf
 				? tab.view === "visual"
-					? "n/p pages · v text · ↑↓ scroll · w close · q quit"
+					? "enter full-res · n/p pages · v text · ↑↓ scroll · q quit"
 					: "v visual · ↑↓ scroll · ←→ tabs · w close · q quit"
-				: "↑↓ scroll · ←→ tabs · w close tab · ctrl+shift+l chat · q quit"
+				: tab.view === "visual"
+					? "enter full-res · ←→ tabs · w close · q quit"
+					: "↑↓ scroll · ←→ tabs · w close tab · ctrl+shift+l chat · q quit"
 			: "ctrl+shift+l to focus";
 		const hints = truncate(hintsFull, Math.max(0, cols - 7 - right.length - 4));
 		const fdash = Math.max(0, cols - 3 - visibleWidth(hints) - 1 - 1 - right.length - 2);
@@ -426,6 +430,8 @@ class DrawerViewer {
 			if (data === "n") return this.h.pageJump(tab, 1);
 			if (data === "p") return this.h.pageJump(tab, -1);
 		}
+		// Fullscreen pixel-perfect viewer for visuals
+		if ((matchesKey(data, "enter") || data === "o") && tab.view === "visual") return this.h.openFull(tab);
 
 		if (matchesKey(data, "up") || data === "k") tab.scroll -= 1;
 		else if (matchesKey(data, "down") || data === "j") tab.scroll += 1;
@@ -439,6 +445,56 @@ class DrawerViewer {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+/**
+ * Fullscreen pixel-perfect viewer. Runs as a NON-overlay custom component —
+ * pi's main linear flow — so the native image protocol renders at full
+ * resolution (crisp in iTerm2/Kitty/Ghostty/WezTerm), unlike the drawer overlay.
+ */
+class FullViewer {
+	private img: Image | null = null;
+	private imgFor = "";
+
+	constructor(
+		private theme: Theme,
+		private tab: Tab,
+		private cb: { close: () => void; pageJump: (dir: 1 | -1) => void },
+	) {}
+
+	private currentB64(): { b64?: string; mime: string } {
+		if (this.tab.data.kind === "image") return { b64: this.tab.data.imageBase64, mime: this.tab.data.imageMime ?? "image/png" };
+		return { b64: this.tab.pngB64, mime: this.tab.pngMime ?? "image/png" };
+	}
+
+	render(width: number): string[] {
+		const t = this.theme;
+		const rows = Math.max(10, (process.stdout.rows || 40) - 2);
+		const { b64, mime } = this.currentB64();
+		const isPdf = this.tab.data.kind === "pdf";
+		const pg = isPdf ? ` · pg ${this.tab.page}/${this.tab.pageCount}` : "";
+		const header = t.fg("accent", t.bold(` ${BRAND} · ${this.tab.data.title}${pg}`));
+		const hints = t.fg("dim", isPdf ? " n/p pages · esc/q back" : " esc/q back");
+		if (!b64) return [header, "", t.fg("dim", " rendering…"), hints];
+		if (this.imgFor !== b64) {
+			this.img = new Image(b64, mime, { fallbackColor: (s: string) => this.theme.fg("dim", s) }, { maxWidthCells: Math.max(20, width - 2), maxHeightCells: rows - 2 });
+			this.imgFor = b64;
+		}
+		return [header, ...(this.img?.render(width) ?? []), hints];
+	}
+
+	invalidate(): void {
+		this.img?.invalidate();
+		this.imgFor = "";
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape") || data === "q" || matchesKey(data, "enter")) return this.cb.close();
+		if (this.tab.data.kind === "pdf") {
+			if (data === "n") return this.cb.pageJump(1);
+			if (data === "p") return this.cb.pageJump(-1);
+		}
+	}
+}
+
 function buildTabBar(tabs: Tab[], active: number, budget: number, t: Theme): { text: string; width: number } {
 	const labels = tabs.map((tab, i) => truncate(`${i + 1}·${tab.data.title}`, 22));
 	const w = labels.map((l) => visibleWidth(l));
@@ -538,6 +594,7 @@ export default function (pi: ExtensionAPI) {
 	let tui: TUI | null = null;
 	let viewer: DrawerViewer | null = null;
 	let ui: { setWidget: (key: string, content: unknown, opts?: unknown) => void } | null = null;
+	let uiCustom: (<T>(factory: (tui: TUI, theme: Theme, kb: unknown, done: (r: T) => void) => unknown, opts?: unknown) => Promise<T>) | null = null;
 	const overlayOpts = { anchor: "right-center" as const, margin: 1, maxHeight: "100%" as const, width: MODE_PCT[mode] };
 	const IMG_WIDGET = "pi-lens-image";
 
@@ -618,15 +675,36 @@ export default function (pi: ExtensionAPI) {
 	};
 	const pageJump = (tab: Tab, dir: 1 | -1) => {
 		const offs = tab.pixels?.pageOffsets;
-		if (!offs || !offs.length) return;
-		const target = Math.min(Math.max(1, pageFromScroll(tab) + dir), offs.length);
-		tab.scroll = offs[target - 1] ?? 0;
+		const total = Math.max(1, tab.pageCount);
+		const target = Math.min(Math.max(1, (offs?.length ? pageFromScroll(tab) : tab.page) + dir), offs?.length ? offs.length : total);
+		if (offs?.length) tab.scroll = offs[target - 1] ?? 0;
 		tab.page = target;
 		refresh();
-		// update hi-res companion for the new page
+		// update hi-res image (companion widget + fullscreen viewer) for the new page
 		void renderPdfPagePng(tab.path, target).then((png) => {
-			if (png) { tab.pngB64 = png.pngB64; tab.pngMime = "image/png"; refreshHifiWidget(); }
+			if (png) { tab.pngB64 = png.pngB64; tab.pngMime = "image/png"; refreshHifiWidget(); refresh(); }
 		});
+	};
+
+	let fullOpen = false;
+	const openFull = (tab: Tab) => {
+		if (!uiCustom || fullOpen) return;
+		fullOpen = true;
+		tab.page = pageFromScroll(tab);
+		// hide the drawer overlay so it doesn't cover the fullscreen image
+		handle?.setHidden(true);
+		void (async () => {
+			try {
+				await uiCustom!((_tui, theme, _kb, done) =>
+					new FullViewer(theme, tab, { close: () => done(undefined), pageJump: (d) => pageJump(tab, d) }),
+				);
+			} finally {
+				fullOpen = false;
+				handle?.setHidden(false);
+				handle?.focus();
+				refresh();
+			}
+		})();
 	};
 
 	const closeAll = () => {
@@ -648,11 +726,12 @@ export default function (pi: ExtensionAPI) {
 
 	const hooks: DrawerHooks = {
 		tabs: () => tabs, active: () => active, setActive, closeActiveTab, closeAll, backToChat, refresh, isFocused,
-		requestVisual, toggleView, pageJump,
+		requestVisual, toggleView, pageJump, openFull,
 	};
 
 	const ensureOpen = (ctx: ExtensionCommandContext) => {
 		ui = ctx.ui as unknown as typeof ui;
+		uiCustom = ctx.ui.custom.bind(ctx.ui) as unknown as typeof uiCustom;
 		if (handle) { handle.focus(); refresh(); refreshHifiWidget(); return; }
 		overlayOpts.width = MODE_PCT[mode];
 		void ctx.ui.custom<{ closed: true }>(
