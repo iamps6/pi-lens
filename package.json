@@ -3,6 +3,7 @@
   "version": "0.2.0",
   "description": "The terminal previewer for pi — tabbed side drawer for markdown, syntax-highlighted code, images, and PDFs (text + visual pages).",
   "keywords": [
+    "pi-package",
     "pi",
     "pi-coding-agent",
     "pi-extension",
@@ -36,8 +37,6 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.84.2",
-    "@earendil-works/pi-tui": "^0.84.2",
     "@types/node": "^22",
     "jiti": "^2.7.0",
     "typescript": "^5.6.0"
@@ -47,5 +46,9 @@
   },
   "optionalDependencies": {
     "@napi-rs/canvas": "^1.0.8"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   }
 }
