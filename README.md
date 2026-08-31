@@ -40,7 +40,9 @@ keep chatting with pi.
 ## Install
 
 ```bash
-pi install git:github.com/iamps6/pi-lens
+pi install npm:@iamps6/pi-lens        # from npm
+# or
+pi install git:github.com/iamps6/pi-lens   # from source
 ```
 
 Or clone for development:

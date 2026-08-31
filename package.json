@@ -1,5 +1,5 @@
 {
-  "name": "pi-lens",
+  "name": "@iamps6/pi-lens",
   "version": "0.2.0",
   "description": "The terminal previewer for pi — tabbed side drawer for markdown, syntax-highlighted code, images, and PDFs (text + visual pages).",
   "keywords": [
@@ -25,7 +25,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/iamps6/pi-lens/main/docs/preview.png"
   },
   "files": [
     "index.ts",
@@ -50,5 +51,8 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

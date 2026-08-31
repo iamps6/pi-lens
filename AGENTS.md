@@ -125,11 +125,6 @@ Manual test in a pi session (symlink the repo into pi's extensions dir, or use
 /lens-mode focus             # resize
 ```
 
-The `samples/` dir is gitignored — create local fixtures there freely; they
-will not ship.
-
-Type-check (after `npm install`): `npm run typecheck`.
-
 ## Roadmap
 
 - Terminal-capability detection (truecolor check for quadrant blocks; fall back to
