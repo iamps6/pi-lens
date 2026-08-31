@@ -51,7 +51,7 @@ Keep both in sync.
   adds line-number gutter + soft wrap.
 - **Visuals (the key architecture)** — images & PDF pages are converted to pixels
   and rendered as **ANSI quadrant blocks** (▘▝▞▛… truecolor fg/bg, 2×2 px per cell) in
-  `src/pixels.ts`. Half-blocks are plain styled text → they work *inside* the
+  `src/pixels.ts`. Quadrant blocks are plain styled text → they work *inside* the
   overlay drawer (scroll/tabs/borders), unlike pi's `Image` component (see
   gotchas). Rendering is async: `contentLines()` returns "rendering…" and calls
   `hooks.requestVisual(tab, innerW)`, which caches `tab.pixels` per width+page
@@ -132,7 +132,7 @@ Type-check (after `npm install`): `npm run typecheck`.
 
 ## Roadmap
 
-- Terminal-capability detection (truecolor check for half-blocks; fall back to
+- Terminal-capability detection (truecolor check for quadrant blocks; fall back to
   256-color quantization).
 - CSV/TSV table rendering.
 - Zoom for visual mode (render at 2x cols and pan horizontally).

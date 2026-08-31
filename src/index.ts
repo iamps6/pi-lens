@@ -10,12 +10,15 @@
  *   ctrl+shift+l     Toggle focus in/out of the drawer (scroll vs. chat)
  *
  * In-drawer keys (when focused):
- *   ↑/↓ j/k          scroll        space/pgdn · pgup   page
+ *   ↑/↓ j/k          scroll        space/pgdn · pgup    page
  *   g / G            top / bottom  ← / → (or Tab)       switch tabs
  *   1..9             jump to tab   w                    close current tab
- *   esc              back to chat  q (or ✕)             close drawer
+ *   enter / o        peek in OS previewer (Quick Look)  q  close drawer
+ *   v                PDF text ⇄ visual pages            n/p next/prev page
+ *   ctrl+shift+l     back to chat
  *
- * Zero system dependencies. PDF uses node:zlib for FlateDecode text extraction.
+ * Deps (npm-only, graceful degradation): pdfjs-dist for PDF text + page rasters;
+ * optional @napi-rs/canvas for visuals. Fallback PDF extractor uses node:zlib.
  */
 
 import { spawn } from "node:child_process";
@@ -248,7 +251,7 @@ interface Tab {
 	path: string;
 	data: Loaded;
 	scroll: number;
-	/** "text" = markdown/extracted text; "visual" = half-block pixel view */
+	/** "text" = markdown/extracted text; "visual" = quadrant-block pixel view */
 	view: "text" | "visual";
 	page: number;
 	pageCount: number;
@@ -304,7 +307,7 @@ class DrawerViewer {
 	private contentLines(tab: Tab, innerW: number, contentRows: number): string[] {
 		const data = tab.data;
 
-		// Visual view: half-block pixels rendered asynchronously, cached per tab.
+		// Visual view: quadrant-block pixels rendered asynchronously, cached per tab.
 		if (tab.view === "visual") {
 			if (tab.visualError) {
 				return [this.theme.fg("error", tab.visualError), "", this.theme.fg("dim", "press v for text view")];
@@ -514,6 +517,7 @@ const WELCOME = [
 	"# pi-lens",
 	"",
 	"You are using **pi-lens** — a TUI previewer for most file types, right inside pi.",
+	"Markdown · code (highlighted) · PDFs (text + visual pages) · images.",
 	"",
 	"## Commands",
 	"- `/lens <path>` — open a file (adds a tab)",
@@ -521,8 +525,10 @@ const WELCOME = [
 	"- `/lens-close` — close the drawer",
 	"",
 	"## Keys",
+	"- `enter` — **peek**: open in the OS previewer (pixel-perfect; esc closes)",
+	"- ↑ ↓ scroll · ← → tabs · `1..9` jump · `w` close tab · `q` quit",
+	"- `v` — PDF: text ⇄ visual pages · `n`/`p` — next/prev page",
 	"- `ctrl+shift+l` — focus in / out of the drawer (scroll vs. chat)",
-	"- ↑ ↓ scroll · ← → tabs · `w` close tab · `q` quit",
 	"",
 	"---",
 	"",
