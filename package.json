@@ -1,7 +1,7 @@
 {
   "name": "pi-lens",
   "version": "0.1.0",
-  "description": "In-terminal file previews for pi — a tabbed side drawer for markdown, syntax-highlighted code, images, and dependency-free PDF text.",
+  "description": "The terminal previewer for pi — tabbed side drawer for markdown, syntax-highlighted code, images, and PDFs (text + visual pages).",
   "keywords": [
     "pi",
     "pi-coding-agent",
@@ -39,6 +39,13 @@
     "@earendil-works/pi-coding-agent": "^0.84.2",
     "@earendil-works/pi-tui": "^0.84.2",
     "@types/node": "^22",
+    "jiti": "^2.7.0",
     "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.3.289"
+  },
+  "optionalDependencies": {
+    "@napi-rs/canvas": "^1.0.8"
   }
 }

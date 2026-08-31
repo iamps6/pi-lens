@@ -15,14 +15,17 @@ without leaving the terminal.
 ## Features
 
 - **Markdown** — rendered with headings, tables, and syntax-highlighted code
-- **Images** — rendered below the editor via your terminal's image protocol (iTerm2, Kitty, Ghostty, WezTerm, Warp); details shown in the drawer tab
-- **Code / text** — scrollable viewer
 - **Code** — syntax-highlighted with line numbers (`.ts` `.js` `.html` `.css` `.py` and many more)
-- **PDF** — dependency-free text extraction (readable, searchable; detects scanned/image PDFs)
+- **PDF** — full text extraction via pdf.js, **plus visual page mode** (`v`): pages
+  render as pixels *inside the drawer*, with `n`/`p` page navigation
+- **Images** — rendered as pixels **inside the drawer** (ANSI half-blocks, any
+  truecolor terminal), plus a hi-res companion below the editor via your
+  terminal's image protocol (iTerm2, Kitty, Ghostty, WezTerm, Warp)
 - **Tabbed side drawer** — open multiple files; switch between them as tabs
 - **Adjustable width** — Regular (50%) · Focus (70%) · Sideshow (30%)
 - **Stays open while you chat** — toggle focus in/out with a shortcut
-- **Zero system dependencies** — pure Node/TypeScript
+- **No system dependencies** — everything installs from npm (`pdfjs-dist` pure JS;
+  `@napi-rs/canvas` optional, prebuilt binaries). Degrades gracefully if absent
 
 ## Install
 
@@ -34,6 +37,7 @@ Or clone for local development:
 
 ```bash
 git clone https://github.com/iamps6/pi-lens
+cd pi-lens && npm install     # installs pdfjs-dist + optional @napi-rs/canvas
 # then add the path to ~/.pi/settings.json under "extensions", or symlink into
 # ~/.pi/agent/extensions/
 ```
@@ -62,6 +66,7 @@ git clone https://github.com/iamps6/pi-lens
 | `space`/`pgdn` `pgup` | page | `1`..`9` | jump to tab |
 | `g` / `G` | top / bottom | `w` | close current tab |
 | `ctrl+shift+l` | back to chat | `q` | close drawer |
+| `v` | PDF: toggle text/visual page view | `n` / `p` | PDF visual: next/prev page |
 
 Try it with the bundled samples:
 
@@ -90,14 +95,24 @@ Try it with the bundled samples:
 - [ ] CSV/TSV table rendering
 - [ ] File picker when no path is given
 
+## How visuals work
+
+Images and PDF pages are converted to pixels and rendered as **ANSI half-block
+characters** (`▀` with truecolor fg/bg = 2 pixels per cell) — plain styled text
+that works inside the drawer with scrolling, tabs, and borders, in any truecolor
+terminal. A **hi-res companion** of the active visual also renders below the
+editor using the native image protocol where supported.
+
 ## Limitations
 
-- **Images** render **below the editor**, not inside the drawer box. pi's image
-  protocol reserves vertical space with cursor-movement escapes that only work in
-  the main linear flow; inside a floating overlay they corrupt the layout. So the
-  drawer tab shows image details while the picture itself draws below the editor.
-- **Scanned/image-only PDFs** have no text layer, so text extraction returns
-  nothing (OCR is out of scope for a zero-dependency extension).
+- Half-block resolution is drawer-width × 2·rows pixels — great for photos,
+  charts, and page layout; fine print on dense PDF pages is best read in text
+  view (`v` toggles).
+- **Scanned/image-only PDFs** have no text layer; use visual mode (`v`) to view
+  them (OCR is out of scope).
+- Without the optional `@napi-rs/canvas`, visual modes are unavailable — images
+  show an info card and PDFs are text-only. Without `pdfjs-dist`, PDF falls back
+  to a basic built-in extractor.
 - The drawer is an **overlay**, so it visually covers the right portion of the
   transcript while open. pi has no split/reserve-column API for extensions.
   Use `/lens-mode sideshow` to minimize coverage, or `/lens-close` when done.

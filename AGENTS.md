@@ -5,17 +5,19 @@ Context for AI agents (and humans) working on this repo.
 ## What this is
 
 **pi-lens** is a [pi](https://pi.dev) extension that previews files inside the
-pi TUI — markdown, source code, images, and PDFs — in a tabbed side **drawer**,
-without leaving the terminal. Zero system dependencies.
+pi TUI — markdown, source code, images, and PDFs (text + visual pages) — in a
+tabbed side **drawer**, without leaving the terminal. npm deps only, no system
+installs: `pdfjs-dist` (pure JS) + optional `@napi-rs/canvas` (prebuilt native).
 
 ## Layout
 
 ```
 index.ts            # entry for pi auto-discovery (~/.pi/agent/extensions/<dir>/index.ts)
                     #   → re-exports default from ./src/index.ts
-src/index.ts        # the whole extension (single file)
+src/index.ts        # extension: commands, drawer UI, tabs, loaders
+src/pixels.ts       # media engine: half-block renderer, image decode, pdf.js text + page rasters
 samples/            # demo files for manual testing
-package.json        # name, pi.extensions (for `pi install`), devDeps for typecheck
+package.json        # name, pi.extensions, deps (pdfjs-dist; optional @napi-rs/canvas)
 ```
 
 `index.ts` exists because pi auto-discovery loads `<dir>/index.ts`, while
@@ -47,19 +49,33 @@ Keep both in sync.
   `hooks`.
 - **Code highlighting** — `highlightSource()` uses pi's `highlightCode()` and
   adds line-number gutter + soft wrap.
-- **PDF** — `extractPdfText()` is dependency-free (node:zlib FlateDecode). It only
-  reads text inside `BT…ET` text objects and runs `isMostlyPrintable()` to avoid
-  emitting image/binary garbage. Scanned PDFs → empty → "no text layer" message.
-- **Images** — cannot render inside the overlay. The active image is drawn as a
-  `belowEditor` widget (`ui.setWidget`) using pi's `Image` component — the same
-  linear-flow path pi uses for tool images. `refreshImageWidget()` keeps it in
-  sync with the active tab and clears it on close.
+- **Visuals (the key architecture)** — images & PDF pages are converted to pixels
+  and rendered as **ANSI half-blocks** (`▀` truecolor fg/bg = 2px per cell) in
+  `src/pixels.ts`. Half-blocks are plain styled text → they work *inside* the
+  overlay drawer (scroll/tabs/borders), unlike pi's `Image` component (see
+  gotchas). Rendering is async: `contentLines()` returns "rendering…" and calls
+  `hooks.requestVisual(tab, innerW)`, which caches `tab.pixels` per width+page
+  and calls `refresh()` when done.
+- **PDF** — text view uses `extractPdfTextRich()` (pdf.js `getTextContent`, handles
+  encodings/CMaps); falls back to the legacy zero-dep `extractPdfText()` (zlib
+  `BT…ET` scan) when pdfjs-dist is missing. Visual view (`v`) rasterizes pages
+  via pdf.js + canvas; `n`/`p` navigate; last doc is cached in pixels.ts.
+- **Hi-res companion** — the active visual (image file or rendered PDF page PNG)
+  is also drawn `belowEditor` via `ui.setWidget` + pi's `Image` component (native
+  protocol, readable fine print). `refreshHifiWidget()` syncs it; cleared on close.
+- **Feature detection** — `hasCanvas()`/`hasPdfjs()` lazy-import once; every visual
+  path degrades gracefully (image → info card; pdf → text-only).
 
 ## Gotchas / hard constraints
 
-- **Images in overlays corrupt the layout.** pi's `Image` uses cursor-movement
-  escapes that only work in the main linear flow. Never put `Image` inside the
-  overlay; use the belowEditor widget path.
+- **Never put pi's `Image` component inside the overlay.** It uses cursor-movement
+  escapes that only work in the main linear flow; in a floating overlay they
+  corrupt the layout ("window inside a window"). In-drawer visuals must be
+  half-blocks (plain text); native-protocol images only via the belowEditor widget.
+- **pdfjs-dist import**: use `pdfjs-dist/legacy/build/pdf.mjs` via dynamic import,
+  and set `globalThis.DOMMatrix/Path2D/ImageData` from @napi-rs/canvas *before*
+  importing it. `page.render({ canvasContext, viewport, canvas })` needs the
+  canvas object in pdf.js v5+.
 - **Overlay width** is driven by `overlayOptions.width`; the resolver reads it
   every frame, so mutate `overlayOpts.width` + `requestRender()` to resize live.
   The width passed to `render()` is the source of truth for `cols`.
@@ -67,9 +83,10 @@ Keep both in sync.
   the transcript while open. This is a pi limitation; `sideshow` mode minimizes it.
 - **Safety caps** (see constants): 8 MB parse limit, 400k text chars, 8000 render
   lines, 2 MB per inflate — these prevent freezes on large/complex files. Keep them.
-- **Zero system deps** is a design goal. Rich/rasterized PDF pages would need an
-  external rasterizer (e.g. macOS `sips`, `pdftoppm`, `mutool`) — treat as an
-  optional, detected enhancement, never a hard dependency.
+- **npm-only deps** is the design line: `dependencies` must install everywhere
+  (`pdfjs-dist` is pure JS); anything with native binaries goes in
+  `optionalDependencies` (`@napi-rs/canvas` has prebuilds) and must be
+  feature-detected at runtime. No system installs (`brew`, `apt`) ever required.
 
 ## Testing
 
@@ -99,9 +116,9 @@ Type-check (after `npm install`): `npm run typecheck`.
 
 ## Roadmap
 
-- Optional rasterized PDF pages (via detected `sips`/`pdftoppm`/`mutool`) shown
-  through the belowEditor image path, with page navigation.
-- Terminal-capability detection / graceful fallback.
+- Terminal-capability detection (truecolor check for half-blocks; fall back to
+  256-color quantization).
 - CSV/TSV table rendering.
+- Zoom for visual mode (render at 2x cols and pan horizontally).
 - Upstream request: a real split/reserve-column API in pi so the drawer can dock
   beside the transcript instead of overlaying it.

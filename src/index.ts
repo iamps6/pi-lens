@@ -29,6 +29,7 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { getLanguageFromPath, getMarkdownTheme, highlightCode } from "@earendil-works/pi-coding-agent";
+import { extractPdfTextRich, hasCanvas, renderImageCells, renderPdfPageCells } from "./pixels.ts";
 import {
 	getImageDimensions,
 	Image,
@@ -194,7 +195,7 @@ function fmtBytes(n: number): string {
 	return `${(n / 1048576).toFixed(1)} MB`;
 }
 
-function load(path: string): Loaded {
+async function load(path: string): Promise<{ data: Loaded; pageCount: number; startVisual: boolean }> {
 	const title = basename(path);
 	const kind = classify(path);
 	const size = statSync(path).size;
@@ -210,29 +211,38 @@ function load(path: string): Loaded {
 			`- **Dimensions:**  ${dim ? `${dim.widthPx} × ${dim.heightPx} px` : "unknown"}`,
 			`- **Size:**  ${fmtBytes(buf.length)}`,
 			"",
-			"---",
-			"",
-			"_The image is shown below the editor ↓ (pi can only draw images in its_",
-			"_main flow, not inside a floating overlay). This tab holds its details._",
+			"_Install optional dependency @napi-rs/canvas to see the image inline._",
 		].join("\n");
-		return { title, kind: "image", content: card, imageBase64: buf.toString("base64"), imageMime: mime };
+		const visual = await hasCanvas();
+		return {
+			data: { title, kind: "image", content: card, imageBase64: buf.toString("base64"), imageMime: mime },
+			pageCount: 0,
+			startVisual: visual,
+		};
 	}
 	if (size > MAX_PARSE_BYTES) {
-		return { title: `${title} · too large`, kind: "text", content: `File is ${(size / 1048576).toFixed(1)} MB — too large to preview safely.` };
+		return { data: { title: `${title} · too large`, kind: "text", content: `File is ${(size / 1048576).toFixed(1)} MB — too large to preview safely.` }, pageCount: 0, startVisual: false };
 	}
 	if (kind === "pdf") {
+		// Proper extraction via pdf.js; fall back to the zero-dep zlib extractor.
+		try {
+			const rich = await extractPdfTextRich(path);
+			if (rich) {
+				return { data: { title, kind: "pdf", content: capText(rich.text) }, pageCount: rich.pageCount, startVisual: false };
+			}
+		} catch { /* fall through */ }
 		let text = "";
 		try {
 			text = extractPdfText(readFileSync(path));
 		} catch (e) {
 			text = `(failed to extract PDF text: ${(e as Error).message})`;
 		}
-		return { title: `${title} · text`, kind: "pdf", content: capText(text || "(no extractable text — this PDF may be scanned/image-only)") };
+		return { data: { title: `${title} · text`, kind: "pdf", content: capText(text || "(no extractable text — install pdfjs-dist for full extraction)") }, pageCount: 0, startVisual: false };
 	}
 	if (kind === "code") {
-		return { title, kind, content: capText(readFileSync(path, "utf8")), lang: getLanguageFromPath(path) };
+		return { data: { title, kind, content: capText(readFileSync(path, "utf8")), lang: getLanguageFromPath(path) }, pageCount: 0, startVisual: false };
 	}
-	return { title, kind, content: capText(readFileSync(path, "utf8")) };
+	return { data: { title, kind, content: capText(readFileSync(path, "utf8")) }, pageCount: 0, startVisual: false };
 }
 
 // ── Drawer state ─────────────────────────────────────────────────────────────
@@ -240,6 +250,15 @@ interface Tab {
 	path: string;
 	data: Loaded;
 	scroll: number;
+	/** "text" = markdown/extracted text; "visual" = half-block pixel view */
+	view: "text" | "visual";
+	page: number;
+	pageCount: number;
+	pixels?: { lines: string[]; forWidth: number; forPage: number };
+	/** hi-res PNG (image file or rendered PDF page) for the belowEditor widget */
+	pngB64?: string;
+	pngMime?: string;
+	visualError?: string;
 }
 
 type Mode = "regular" | "focus" | "sideshow";
@@ -255,6 +274,10 @@ interface DrawerHooks {
 	backToChat: () => void;
 	refresh: () => void;
 	isFocused: () => boolean;
+	/** Kick an async half-block render for a visual tab (image / pdf page). */
+	requestVisual: (tab: Tab, innerW: number) => void;
+	toggleView: (tab: Tab) => void;
+	setPage: (tab: Tab, page: number) => void;
 }
 
 const BRAND = "pi-lens";
@@ -270,7 +293,21 @@ class DrawerViewer {
 		return Math.max(8, (process.stdout.rows || 40) - 4);
 	}
 
-	private contentLines(data: Loaded, innerW: number, contentRows: number): string[] {
+	private contentLines(tab: Tab, innerW: number, contentRows: number): string[] {
+		const data = tab.data;
+
+		// Visual view: half-block pixels rendered asynchronously, cached per tab.
+		if (tab.view === "visual") {
+			if (tab.visualError) {
+				return [this.theme.fg("error", tab.visualError), "", this.theme.fg("dim", "press v for text view")];
+			}
+			if (tab.pixels && tab.pixels.forWidth === innerW && tab.pixels.forPage === tab.page) {
+				return tab.pixels.lines;
+			}
+			this.h.requestVisual(tab, innerW);
+			return [this.theme.fg("dim", tab.pageCount ? `rendering page ${tab.page}/${tab.pageCount}…` : "rendering…")];
+		}
+
 		const key = `${data.title}|${data.kind}|${innerW}x${contentRows}`;
 		if (this.cache && this.cacheKey === key) return this.cache;
 		let lines: string[];
@@ -308,7 +345,7 @@ class DrawerViewer {
 		const tab = tabs[active];
 		if (!tab) return [border("┌" + "─".repeat(cols - 2) + "┐"), border("│") + " no file ".padEnd(cols - 2) + border("│"), border("└" + "─".repeat(cols - 2) + "┘")];
 
-		const all = this.contentLines(tab.data, innerW, contentRows);
+		const all = this.contentLines(tab, innerW, contentRows);
 		const maxScroll = Math.max(0, all.length - contentRows);
 		if (tab.scroll > maxScroll) tab.scroll = maxScroll;
 		if (tab.scroll < 0) tab.scroll = 0;
@@ -331,9 +368,14 @@ class DrawerViewer {
 
 		// Footer: └─ hints ────[ 42% ]┘
 		const pct = all.length <= contentRows ? 100 : Math.round((tab.scroll / maxScroll) * 100);
-		const right = `${pct}%`;
+		const isPdf = tab.data.kind === "pdf" && tab.pageCount > 0;
+		const right = tab.view === "visual" && isPdf ? `pg ${tab.page}/${tab.pageCount}` : `${pct}%`;
 		const hintsFull = focused
-			? "↑↓ scroll · ←→ tabs · w close tab · ctrl+shift+l chat · q quit"
+			? isPdf
+				? tab.view === "visual"
+					? "n/p pages · v text · ↑↓ scroll · w close · q quit"
+					: "v visual · ↑↓ scroll · ←→ tabs · w close · q quit"
+				: "↑↓ scroll · ←→ tabs · w close tab · ctrl+shift+l chat · q quit"
 			: "ctrl+shift+l to focus";
 		const hints = truncate(hintsFull, Math.max(0, cols - 7 - right.length - 4));
 		const fdash = Math.max(0, cols - 3 - visibleWidth(hints) - 1 - 1 - right.length - 2);
@@ -365,6 +407,13 @@ class DrawerViewer {
 			const idx = parseInt(data, 10) - 1;
 			if (idx < tabs.length) this.h.setActive(idx);
 			return;
+		}
+
+		// PDF: v toggles text/visual; n/p page nav in visual view
+		if (data === "v" && tab.data.kind === "pdf" && tab.pageCount > 0) return this.h.toggleView(tab);
+		if (tab.data.kind === "pdf" && tab.view === "visual") {
+			if (data === "n") return this.h.setPage(tab, tab.page + 1);
+			if (data === "p") return this.h.setPage(tab, tab.page - 1);
 		}
 
 		if (matchesKey(data, "up") || data === "k") tab.scroll -= 1;
@@ -467,7 +516,7 @@ const WELCOME = [
 	"",
 	"Built with ♥ by [iamps6](https://github.com/iamps6)",
 ].join("\n");
-const welcomeTab = (): Tab => ({ path: WELCOME_PATH, data: { title: "welcome", kind: "markdown", content: WELCOME }, scroll: 0 });
+const welcomeTab = (): Tab => ({ path: WELCOME_PATH, data: { title: "welcome", kind: "markdown", content: WELCOME }, scroll: 0, view: "text", page: 1, pageCount: 0 });
 
 // ── extension ─────────────────────────────────────────────────────────────────
 export default function (pi: ExtensionAPI) {
@@ -484,22 +533,68 @@ export default function (pi: ExtensionAPI) {
 	const refresh = () => { viewer?.invalidate(); tui?.requestRender(); };
 	const isFocused = () => !!handle?.isFocused();
 
-	// Images can't render inside the overlay, so draw the active image in pi's
-	// linear flow as a belowEditor widget (same path pi uses for tool images).
-	const refreshImageWidget = () => {
+	// Hi-res companion: show the active visual (image file or rendered PDF page)
+	// below the editor via the native image protocol (pi's linear flow).
+	const refreshHifiWidget = () => {
 		if (!ui) return;
 		const tab = tabs[active];
-		if (tab && tab.data.kind === "image" && tab.data.imageBase64 && tab.data.imageMime) {
-			const b64 = tab.data.imageBase64, mime = tab.data.imageMime;
+		const b64 = tab?.view === "visual" ? (tab.pngB64 ?? tab.data.imageBase64) : undefined;
+		const mime = tab?.pngMime ?? tab?.data.imageMime ?? "image/png";
+		if (tab && b64) {
 			const maxW = Math.max(20, Math.min(90, (process.stdout.columns || 100) - 6));
 			ui.setWidget(
 				IMG_WIDGET,
-				(_tui: unknown, theme: Theme) => new Image(b64, mime, { fallbackColor: (s: string) => theme.fg("dim", s) }, { maxWidthCells: maxW }),
+				(_tui: unknown, theme: Theme) => new Image(b64, mime, { fallbackColor: (s: string) => theme.fg("dim", s) }, { maxWidthCells: maxW, maxHeightCells: 22 }),
 				{ placement: "belowEditor" },
 			);
 		} else {
 			ui.setWidget(IMG_WIDGET, undefined);
 		}
+	};
+
+	// Async half-block renderer for visual tabs (images & PDF pages).
+	const visualJobs = new Set<string>();
+	const requestVisual = (tab: Tab, innerW: number) => {
+		const key = `${tab.path}@${innerW}@${tab.page}`;
+		if (visualJobs.has(key)) return;
+		visualJobs.add(key);
+		void (async () => {
+			try {
+				if (tab.data.kind === "image") {
+					const r = await renderImageCells(tab.path, innerW);
+					if (r) tab.pixels = { lines: r.lines, forWidth: innerW, forPage: tab.page };
+					else { tab.visualError = "image decode unavailable (@napi-rs/canvas not installed)"; tab.view = "text"; }
+				} else if (tab.data.kind === "pdf") {
+					const r = await renderPdfPageCells(tab.path, tab.page, innerW);
+					if (r) {
+						tab.pixels = { lines: r.lines, forWidth: innerW, forPage: tab.page };
+						tab.pageCount = r.pageCount;
+						tab.pngB64 = r.pngB64;
+						tab.pngMime = "image/png";
+					} else { tab.visualError = "page render unavailable (@napi-rs/canvas not installed)"; tab.view = "text"; }
+				}
+			} catch (e) {
+				tab.visualError = `render failed: ${(e as Error).message}`;
+			} finally {
+				visualJobs.delete(key);
+				refresh();
+				refreshHifiWidget();
+			}
+		})();
+	};
+	const toggleView = (tab: Tab) => {
+		tab.view = tab.view === "visual" ? "text" : "visual";
+		tab.visualError = undefined;
+		tab.scroll = 0;
+		refresh();
+		refreshHifiWidget();
+	};
+	const setPage = (tab: Tab, page: number) => {
+		const clamped = Math.min(Math.max(1, page), Math.max(1, tab.pageCount));
+		if (clamped === tab.page) return;
+		tab.page = clamped;
+		tab.scroll = 0;
+		refresh();
 	};
 
 	const closeAll = () => {
@@ -508,24 +603,25 @@ export default function (pi: ExtensionAPI) {
 		handle = null; tui = null; viewer = null;
 		tabs.length = 0; active = 0;
 	};
-	const setActive = (i: number) => { active = i; refresh(); refreshImageWidget(); };
+	const setActive = (i: number) => { active = i; refresh(); refreshHifiWidget(); };
 	const closeActiveTab = () => {
 		if (!tabs.length) return;
 		tabs.splice(active, 1);
 		if (!tabs.length) return closeAll();
 		if (active >= tabs.length) active = tabs.length - 1;
 		refresh();
-		refreshImageWidget();
+		refreshHifiWidget();
 	};
 	const backToChat = () => { handle?.unfocus(); refresh(); };
 
 	const hooks: DrawerHooks = {
 		tabs: () => tabs, active: () => active, setActive, closeActiveTab, closeAll, backToChat, refresh, isFocused,
+		requestVisual, toggleView, setPage,
 	};
 
 	const ensureOpen = (ctx: ExtensionCommandContext) => {
 		ui = ctx.ui as unknown as typeof ui;
-		if (handle) { handle.focus(); refresh(); refreshImageWidget(); return; }
+		if (handle) { handle.focus(); refresh(); refreshHifiWidget(); return; }
 		overlayOpts.width = MODE_PCT[mode];
 		void ctx.ui.custom<{ closed: true }>(
 			(tuiArg, theme, _kb, _done) => {
@@ -535,7 +631,7 @@ export default function (pi: ExtensionAPI) {
 			},
 			{ overlay: true, overlayOptions: overlayOpts, onHandle: (h) => { handle = h; h.focus(); } },
 		);
-		refreshImageWidget();
+		refreshHifiWidget();
 	};
 
 	pi.registerCommand("lens", {
@@ -551,8 +647,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const path = expandPath(raw, ctx.cwd);
-			let data: Loaded;
-			try { data = load(path); }
+			let loaded: Awaited<ReturnType<typeof load>>;
+			try { loaded = await load(path); }
 			catch (e) { return ctx.ui.notify(`Cannot open ${path}: ${(e as Error).message}`, "error"); }
 
 			// Replace the welcome tab on first real open
@@ -560,8 +656,22 @@ export default function (pi: ExtensionAPI) {
 			if (wi >= 0) tabs.splice(wi, 1);
 
 			const existing = tabs.findIndex((tb) => tb.path === path);
-			if (existing >= 0) { active = existing; tabs[existing]!.data = data; }
-			else { tabs.push({ path, data, scroll: 0 }); active = tabs.length - 1; }
+			if (existing >= 0) {
+				active = existing;
+				const tb = tabs[existing]!;
+				tb.data = loaded.data;
+				tb.pageCount = loaded.pageCount || tb.pageCount;
+			} else {
+				tabs.push({
+					path,
+					data: loaded.data,
+					scroll: 0,
+					view: loaded.startVisual ? "visual" : "text",
+					page: 1,
+					pageCount: loaded.pageCount,
+				});
+				active = tabs.length - 1;
+			}
 
 			ensureOpen(ctx);
 		},
