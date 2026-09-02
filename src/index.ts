@@ -33,7 +33,7 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { getLanguageFromPath, getMarkdownTheme, highlightCode } from "@earendil-works/pi-coding-agent";
-import { extractPdfTextRich, hasCanvas, MAX_VISUAL_PAGES, renderImageCells, renderPdfPages } from "./pixels.ts";
+import { disposePdf, extractPdfTextRich, hasCanvas, MAX_VISUAL_PAGES, renderImageCells, renderPdfPages } from "./pixels.ts";
 import {
 	getImageDimensions,
 	Key,
@@ -79,10 +79,25 @@ function expandPath(p: string, cwd: string): string {
 	return isAbsolute(s) ? s : resolve(cwd, s);
 }
 
+/**
+ * Strip terminal control characters from untrusted file content so a malicious
+ * file can't smuggle its own escape sequences (cursor moves, screen rewrites,
+ * window-title / clipboard / OSC tricks) into the drawer when we render it.
+ * Keep \t and \n; drop the rest of C0, DEL, and the C1 range. Styling escapes
+ * that pi-lens adds itself (highlighter, gutters, page markers) are applied
+ * AFTER this, so they are unaffected.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
+function sanitizeText(s: string): string {
+	return s.replace(CONTROL_CHARS, "");
+}
+
 function capText(s: string): string {
-	return s.length > MAX_TEXT_CHARS
-		? s.slice(0, MAX_TEXT_CHARS) + "\n\n… (truncated — file too large to preview fully)"
-		: s;
+	const clean = sanitizeText(s);
+	return clean.length > MAX_TEXT_CHARS
+		? clean.slice(0, MAX_TEXT_CHARS) + "\n\n… (truncated — file too large to preview fully)"
+		: clean;
 }
 
 // ── Dependency-free PDF text extraction ─────────────────────────────────────
@@ -108,7 +123,10 @@ function extractPdfText(buf: Buffer): string {
 		let text: string | undefined;
 		for (const fn of [inflateSync, inflateRawSync]) {
 			try {
-				const dec = fn(chunk);
+				// Cap output DURING decompression — a few-KB stream can otherwise
+				// inflate to gigabytes (a "zip bomb") and exhaust memory before we
+				// ever get a chance to slice it. maxOutputLength throws past the cap.
+				const dec = fn(chunk, { maxOutputLength: MAX_INFLATE_CHARS });
 				text = dec.subarray(0, MAX_INFLATE_CHARS).toString("latin1");
 				break;
 			} catch {
@@ -197,7 +215,9 @@ function fmtBytes(n: number): string {
 }
 
 async function load(path: string): Promise<{ data: Loaded; pageCount: number; startVisual: boolean }> {
-	const title = basename(path);
+	// Filenames are attacker-controllable too (they appear in tab labels and the
+	// image card), so strip control characters from the title as well.
+	const title = sanitizeText(basename(path));
 	const kind = classify(path);
 	const size = statSync(path).size;
 
@@ -620,6 +640,8 @@ export default function (pi: ExtensionAPI) {
 		handle?.hide();
 		handle = null; tui = null; viewer = null;
 		tabs.length = 0; active = 0;
+		// Release the cached pdf.js document (worker + buffers) on close.
+		disposePdf();
 	};
 	const setActive = (i: number) => { active = i; refresh(); };
 	const closeActiveTab = () => {

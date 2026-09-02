@@ -164,12 +164,26 @@ async function openDoc(path: string): Promise<any | null> {
 	if (docCache?.path === path) return docCache.doc;
 	docCache?.doc?.destroy?.();
 	docCache = null;
-	const doc = await pdfjs.getDocument({
+	const task = pdfjs.getDocument({
 		data: new Uint8Array(readFileSync(path)),
 		useSystemFonts: true,
-	}).promise;
-	docCache = { path, doc };
-	return doc;
+	});
+	try {
+		const doc = await task.promise;
+		docCache = { path, doc };
+		return doc;
+	} catch (e) {
+		// Free the loading task / worker resources on failure instead of leaking
+		// them; the cache stays null so the next attempt starts clean.
+		task.destroy?.();
+		throw e;
+	}
+}
+
+/** Release the cached PDF document (worker, buffers). Call on drawer close. */
+export function disposePdf(): void {
+	docCache?.doc?.destroy?.();
+	docCache = null;
 }
 
 export interface PdfText {
@@ -185,17 +199,21 @@ export async function extractPdfTextRich(path: string): Promise<PdfText | null> 
 	let total = 0;
 	for (let p = 1; p <= doc.numPages && total < MAX_PDF_TEXT; p++) {
 		const page = await doc.getPage(p);
-		const tc = await page.getTextContent();
-		let line = "";
-		const chunks: string[] = [];
-		for (const item of tc.items as Array<{ str?: string; hasEOL?: boolean }>) {
-			if (item.str) line += item.str;
-			if (item.hasEOL) { chunks.push(line); line = ""; }
+		try {
+			const tc = await page.getTextContent();
+			let line = "";
+			const chunks: string[] = [];
+			for (const item of tc.items as Array<{ str?: string; hasEOL?: boolean }>) {
+				if (item.str) line += item.str;
+				if (item.hasEOL) { chunks.push(line); line = ""; }
+			}
+			if (line) chunks.push(line);
+			const pageText = chunks.join("\n").trim();
+			parts.push(`── Page ${p}/${doc.numPages} ──\n\n${pageText || "(no text on this page)"}`);
+			total += pageText.length;
+		} finally {
+			page.cleanup?.();
 		}
-		if (line) chunks.push(line);
-		const pageText = chunks.join("\n").trim();
-		parts.push(`── Page ${p}/${doc.numPages} ──\n\n${pageText || "(no text on this page)"}`);
-		total += pageText.length;
 	}
 	return { pageCount: doc.numPages, text: parts.join("\n\n") };
 }
@@ -232,15 +250,19 @@ export async function renderPdfPages(
 	const n = Math.min(doc.numPages, MAX_VISUAL_PAGES);
 	for (let p = 1; p <= n; p++) {
 		const page = await doc.getPage(p);
-		const full = await rasterPageCanvas(c, page, pixelW);
-		// vertical squeeze to half height (pixel aspect is 1:2 in quadrant cells)
-		const sq = c.createCanvas(full.width, Math.max(2, Math.round(full.height / 2)));
-		const sctx = sq.getContext("2d");
-		sctx.imageSmoothingEnabled = true;
-		sctx.imageSmoothingQuality = "high";
-		sctx.drawImage(full, 0, 0, full.width, full.height, 0, 0, sq.width, sq.height);
-		const d = sctx.getImageData(0, 0, sq.width, sq.height).data;
-		onPage(quadrantBlocks(d, sq.width, sq.height), p, doc.numPages);
+		try {
+			const full = await rasterPageCanvas(c, page, pixelW);
+			// vertical squeeze to half height (pixel aspect is 1:2 in quadrant cells)
+			const sq = c.createCanvas(full.width, Math.max(2, Math.round(full.height / 2)));
+			const sctx = sq.getContext("2d");
+			sctx.imageSmoothingEnabled = true;
+			sctx.imageSmoothingQuality = "high";
+			sctx.drawImage(full, 0, 0, full.width, full.height, 0, 0, sq.width, sq.height);
+			const d = sctx.getImageData(0, 0, sq.width, sq.height).data;
+			onPage(quadrantBlocks(d, sq.width, sq.height), p, doc.numPages);
+		} finally {
+			page.cleanup?.();
+		}
 	}
 	return doc.numPages;
 }
@@ -252,13 +274,17 @@ export async function renderPdfPagePng(path: string, pageNum: number): Promise<{
 	if (!c || !doc) return null;
 	const n = Math.min(Math.max(1, pageNum), doc.numPages);
 	const page = await doc.getPage(n);
-	const vp1 = page.getViewport({ scale: 1 });
-	const scale = Math.min(1600 / vp1.width, 4);
-	const vp = page.getViewport({ scale });
-	const canvas = c.createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
-	const ctx = canvas.getContext("2d");
-	ctx.fillStyle = "#ffffff";
-	ctx.fillRect(0, 0, canvas.width, canvas.height);
-	await page.render({ canvasContext: ctx, viewport: vp, canvas }).promise;
-	return { pngB64: canvas.toBuffer("image/png").toString("base64"), pageCount: doc.numPages };
+	try {
+		const vp1 = page.getViewport({ scale: 1 });
+		const scale = Math.min(1600 / vp1.width, 4);
+		const vp = page.getViewport({ scale });
+		const canvas = c.createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
+		const ctx = canvas.getContext("2d");
+		ctx.fillStyle = "#ffffff";
+		ctx.fillRect(0, 0, canvas.width, canvas.height);
+		await page.render({ canvasContext: ctx, viewport: vp, canvas }).promise;
+		return { pngB64: canvas.toBuffer("image/png").toString("base64"), pageCount: doc.numPages };
+	} finally {
+		page.cleanup?.();
+	}
 }
