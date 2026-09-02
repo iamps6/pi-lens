@@ -19,7 +19,7 @@
   "homepage": "https://github.com/iamps6/pi-lens",
   "repository": {
     "type": "git",
-    "url": "https://github.com/iamps6/pi-lens.git"
+    "url": "git+https://github.com/iamps6/pi-lens.git"
   },
   "type": "module",
   "pi": {
