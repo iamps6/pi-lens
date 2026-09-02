@@ -69,6 +69,31 @@ Keep both in sync.
 - **Feature detection** — `hasCanvas()`/`hasPdfjs()` lazy-import once; every visual
   path degrades gracefully (image → info card; pdf → text-only).
 
+## Security hardening (v0.2.1 — from Venkat's pre-install review)
+
+pi-lens renders **untrusted files**, so treat file bytes (and filenames) as
+adversarial. Three hardening measures are in place — keep them:
+
+- **Terminal control-character sanitization.** `sanitizeText()` (src/index.ts)
+  strips C0/C1/DEL control bytes (keeps `\t`/`\n`) so a malicious file can't
+  inject terminal escape sequences (OSC title/clipboard, screen rewrites, cursor
+  moves) into the drawer. It's folded into `capText()`, which every body-text
+  path flows through, and is applied to `title` (`basename(path)`) at load.
+  pi-lens's *own* styling escapes are added *after* this, so highlighting /
+  gutters / page markers are unaffected. Do not write raw file content to the
+  terminal without going through `capText`/`sanitizeText`.
+- **Decompression-bomb cap.** The zero-dep `extractPdfText()` inflates streams
+  with `{ maxOutputLength: MAX_INFLATE_CHARS }` so a small stream can't balloon
+  to hundreds of MB. Never call `inflateSync`/`inflateRawSync` here without the
+  cap (verified: 500 MB payload rejected in ~2 ms vs. a 524 MB native alloc).
+- **pdf.js resource cleanup.** Every `getPage()` is wrapped in `try/finally`
+  with `page.cleanup()`; `openDoc()` destroys the loading task on failure; and
+  `disposePdf()` (src/pixels.ts) releases the cached document — called from
+  `closeAll()` on drawer close. Don't leak pages/docs on new/error paths.
+
+Review verdict: no credential access, telemetry, or network behavior found.
+Venkat is **not** sending a PR — these fixes were applied directly upstream.
+
 ## Gotchas / hard constraints
 
 - **Native raster protocols do not work on ANY extension surface.** User-verified
@@ -96,6 +121,8 @@ Keep both in sync.
   the transcript while open. This is a pi limitation; `sideshow` mode minimizes it.
 - **Safety caps** (see constants): 8 MB parse limit, 400k text chars, 8000 render
   lines, 2 MB per inflate — these prevent freezes on large/complex files. Keep them.
+  The 2 MB inflate cap is enforced *during* decompression via `maxOutputLength`
+  (not just sliced after) — see Security hardening above.
 - **npm-only deps** is the design line: `dependencies` must install everywhere
   (`pdfjs-dist` is pure JS); anything with native binaries goes in
   `optionalDependencies` (`@napi-rs/canvas` has prebuilds) and must be
